@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "npx nodemon src/main.mjs",
     "start": "node src/main.mjs",
-    "build": "yarn install && yarn playwright install"
+    "build": "yarn install && yarn playwright install --with-deps"
   },
   "author": "Lautaro Chini",
   "license": "ISC",
