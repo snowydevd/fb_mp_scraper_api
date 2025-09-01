@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "npx nodemon src/main.mjs",
     "start": "node src/main.mjs",
-    "build": "yarn install && yarn playwright install --with-deps --force"
+    "build": "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 yarn install"
+
   },
   "author": "Lautaro Chini",
   "license": "ISC",
