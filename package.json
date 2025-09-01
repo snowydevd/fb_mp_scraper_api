@@ -4,7 +4,9 @@
   "description": "",
   "main": "main.mjs",
   "scripts": {
-    "dev": "npx nodemon src/main.mjs"
+    "dev": "npx nodemon src/main.mjs",
+    "start": "node src/main.mjs",
+    "build": "echo 'No build required'"
   },
   "author": "Lautaro Chini",
   "license": "ISC",
