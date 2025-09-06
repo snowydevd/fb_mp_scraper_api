@@ -34,7 +34,7 @@ export async function scrapeMarketplace(searchQuery, location = 'montevideo', mi
         minPrice = parseInt(minPrice) || 0;
         maxPrice = parseInt(maxPrice) || Infinity;
 
-        if(minPrice > price || price > maxPrice) return null;
+        // if(minPrice > price || price > maxPrice) return null;
 
         // if (keywords.length > 0) {
         //   const itemText = text.join(" ").toLowerCase();
@@ -67,5 +67,5 @@ export async function scrapeMarketplace(searchQuery, location = 'montevideo', mi
     if(newHeight === previousHeight) break;
   }
 
-  return items.slice(0, 10);
+  return items;
 }
