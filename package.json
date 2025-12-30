@@ -5,11 +5,16 @@
   "type": "module",
   "scripts": {
     "start": "node src/main.mjs",
+<<<<<<< HEAD
     "dev": "npx nodemon src/main.mjs",
     "postinstall": "playwright install"
+=======
+    "build": "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 yarn install"
+>>>>>>> 48e6fbf (code polish and fixes)
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "playwright": "^1.55.0"
