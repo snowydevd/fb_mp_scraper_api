@@ -1,0 +1,21 @@
+{
+  "name": "fb-marketplace-mcp",
+  "version": "1.0.0",
+  "description": "MCP server exposing the Facebook Marketplace scraper API as tools",
+  "type": "module",
+  "bin": {
+    "fb-marketplace-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
