@@ -10,6 +10,9 @@
  * further "-11% of asking" - that just burns the opportunity.
  */
 
+import { totalDebt } from "./debt.mjs";
+import { config } from "../../config.mjs";
+
 export const OFFER = {
   desiredMarginPct: 0.18, // what we want to be under market when we buy
   outlookBands: { high: 0.08, medium: 0.18 }, // gap from asking -> acceptance outlook
@@ -21,9 +24,16 @@ export const OFFER = {
   // same-day, self-collected purchase is worth at least this much of a
   // discount, so the offer floor sits below asking rather than on it.
   minCashDiscountPct: 0.03,
+  // Por encima de esta fracción de la oferta, la deuda deja de ser un ajuste de
+  // precio y pasa a ser el negocio: se marca para que una persona lo mire antes
+  // de mandar nada.
+  debtDominatesPct: 0.4,
 };
 
 const round = (v, step) => Math.round(v / step) * step;
+// Al netear una deuda se redondea SIEMPRE para abajo: redondear para arriba
+// devolvería parte de la deuda que acabamos de descontar.
+const roundDown = (v, step) => Math.floor(v / step) * step;
 
 /**
  * @param {object} listing  { price, currencyResolved, listedAt, priceChangeCount, oldPrice }
@@ -58,6 +68,27 @@ export function suggestOffer(listing, reference) {
     offer = Math.min(round(asking * (1 - OFFER.minCashDiscountPct), OFFER.roundTo), asking - 1);
     anchoredTo = "asking_cash_discount";
   }
+
+  // --- deuda declarada -------------------------------------------------
+  // Una deuda que el vendedor pone por escrito no es motivo para descartar la
+  // publicación: es plata que vamos a pagar nosotros, así que sale de la
+  // oferta. flags.mjs ya la penaliza en el ranking, que mide otra cosa (el
+  // riesgo); acá se resuelve el precio.
+  const currency = listing.currencyResolved ?? listing.currency_resolved ?? reference.currency ?? null;
+  const debt = totalDebt(
+    `${listing.title ?? ""}\n${listing.description ?? ""}`,
+    { currency, uyuPerUsd: config.fx.uyuPerUsd }
+  );
+  const offerBeforeDebt = offer;
+  if (debt.total > 0) offer = Math.max(0, roundDown(offer - debt.total, OFFER.roundTo));
+
+  if (offer <= 0) {
+    return {
+      ok: false,
+      reason: `la deuda declarada (${currency ?? ""} ${debt.total}) se come la oferta entera`,
+      debt,
+    };
+  }
   const gapFromAsking = (asking - offer) / asking;
   const underMarket = (reference.median - offer) / reference.median;
 
@@ -78,6 +109,17 @@ export function suggestOffer(listing, reference) {
     anchoredTo,
     referenceSampleSize: reference.sampleSize,
     referenceSource: reference.source ?? null,
+
+    debt: {
+      deducted: Math.round((offerBeforeDebt - offer) * 100) / 100,
+      currency,
+      offerBeforeDebt,
+      items: debt.applied,
+      // Montos que NO se descontaron porque no se sabe en qué moneda están.
+      // Los tiene que mirar una persona antes de mandar la oferta.
+      needsReview: debt.unresolved,
+      dominates: debt.total > offerBeforeDebt * OFFER.debtDominatesPct,
+    },
   };
 }
 
@@ -108,6 +150,14 @@ export function draftMessage(listing, offerResult) {
 
   if (drops >= 2) {
     lines.push(`Vi que ajustaste el precio más de una vez, así que te tiro una propuesta concreta.`);
+  }
+
+  // Si la oferta bajó por una deuda que el propio aviso declara, decirlo es la
+  // posición más fuerte que hay: el número deja de parecer arbitrario y queda
+  // claro que se leyó la publicación.
+  if (offerResult.debt?.deducted > 0) {
+    const d = offerResult.debt.deducted.toLocaleString("es-UY");
+    lines.push(`Vi que la publicación menciona una deuda de ${cur} ${d}, así que la oferta ya la contempla.`);
   }
 
   if (offerResult.anchoredTo === "asking_cash_discount") {

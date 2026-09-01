@@ -225,6 +225,16 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
         log("info", `skipping contact draft for ${merged.id}: dealer verdict ${dealer.confidence} (${dealer.reasons.join(", ")})`);
       } else {
         const entry = buildContactEntry({ ...merged, priceChangeCount: cand.listing.priceChangeCount }, reference);
+        const debt = entry.rationale?.debt;
+        if (debt?.deducted > 0) {
+          log("info", `${merged.id}: deuda declarada de ${debt.currency} ${debt.deducted} descontada de la oferta`);
+        }
+        if (debt?.needsReview?.length) {
+          // No se descontó porque no se sabe la moneda. Tiene que verlo una
+          // persona ANTES de mandar la oferta, no después.
+          log("error", `${merged.id}: hay deuda declarada SIN descontar (revisar a mano): ` +
+            debt.needsReview.map((d) => `${d.amount} — ${d.reason}`).join("; "));
+        }
         if (entry.ok) {
           queue.push(entry);
           if (repo) {
@@ -288,6 +298,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           console.log(`\n${q.listingId} | oferta ${q.currency} ${q.suggestedOffer} (pide ${q.rationale.asking}, ` +
             `mediana ${Math.round(q.rationale.marketMedian)}, expectativa ${q.rationale.acceptanceOutlook}, ` +
             `anclado a ${q.rationale.anchoredTo})`);
+          const d = q.rationale.debt;
+          if (d?.deducted > 0) {
+            console.log(`  deuda: -${d.currency} ${d.deducted} (la oferta antes de la deuda era ${d.offerBeforeDebt})` +
+              (d.dominates ? "  ** la deuda domina el negocio, mirala bien **" : ""));
+          }
+          if (d?.needsReview?.length) {
+            console.log(`  ** REVISAR A MANO: deuda declarada sin descontar -> ` +
+              d.needsReview.map((x) => `${x.amount} (${x.reason})`).join("; ") + " **");
+          }
           console.log(`  "${q.messageDraft}"`);
         }
       }

@@ -9,6 +9,11 @@ const int = (name, fallback) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
+const num = (name, fallback) => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
 export const config = {
   port: int("PORT", 4000),
 
@@ -41,6 +46,12 @@ export const config = {
     carsCategory: process.env.MELI_CARS_CATEGORY || "MLU1744",
     cacheTtlHours: int("MELI_CACHE_TTL_HOURS", 72),
   },
+
+  // Tipo de cambio, sólo para netear una deuda declarada en una moneda contra
+  // una oferta en la otra. Sin esto configurado no se convierte NADA: inventar
+  // un tipo de cambio para poder restar sería peor que no restar, y el monto
+  // queda reportado para que lo mire una persona.
+  fx: { uyuPerUsd: num("UYU_PER_USD", null) },
 
   db: { url: process.env.DATABASE_URL || null },
 };

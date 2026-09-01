@@ -167,6 +167,7 @@ renovarla.
 | `WORKER_JITTER_PCT`         | 0.2     | Jitter aplicado al intervalo         |
 | `WORKER_ACTIVE_HOURS`       | 9-22    | Ventana horaria en que puede correr  |
 | `MELI_CACHE_TTL_HOURS`      | 72      | TTL del cache de precios de referencia |
+| `UYU_PER_USD`               | —       | Tipo de cambio para netear deuda en la otra moneda; sin esto no se convierte |
 
 ## Servidor MCP
 
@@ -361,6 +362,48 @@ que no está sumado hace que los números no cierren para quien los lea.
 Del otro lado suman: `libre de deuda`, `sin deuda`, `no debe nada`,
 `sin prenda`, `patente al día`, `prenda cancelada`, `único dueño`,
 `papeles al día`.
+
+### La deuda sale del precio, no de la lista
+
+Una deuda que el vendedor pone por escrito **no es motivo para descartar la
+publicación**: es plata que vamos a pagar nosotros, así que sale de la oferta.
+Son dos ejes distintos y los dos se usan — `flags.mjs` la penaliza en el
+**ranking**, donde mide riesgo; `debt.mjs` la descuenta del **precio**, que es
+donde el problema se resuelve.
+
+```
+Citroën Picasso, pide USD 6.500, mediana 7.495
+  sin deuda                        -> oferta 6.150
+  "Debe 200 dólares de patente"    -> oferta 5.950   (-200)
+  "prenda, saldo 2000 usd"         -> oferta 4.150   (-2000, marcado: la deuda domina)
+  "Debo 8000 usd de prenda"        -> sin borrador: la deuda se come la oferta
+```
+
+Y el borrador lo dice de frente, que es la posición más fuerte que hay — el
+número deja de parecer arbitrario y queda claro que se leyó la publicación:
+
+> "Vi que la publicación menciona una deuda de USD 200, así que la oferta ya la
+> contempla."
+
+**Dos reglas mandan sobre todo lo demás:**
+
+**Sin moneda segura, no se descuenta.** Esta plata entra en una oferta que una
+persona va a mandar. Restarle 15.000 pesos a un precio en dólares convierte una
+oferta de USD 6.150 en una de USD -8.850. Cuando la moneda no está declarada
+(un `$` pelado es ambiguo acá) o está en la otra moneda sin tipo de cambio
+configurado, el monto **no se toca** y viaja en `debt.needsReview` para que lo
+mire un humano. El worker lo loguea como error, no como info.
+
+Si querés que convierta, configurá `UYU_PER_USD`. Sin eso no se convierte nada:
+inventar un tipo de cambio para poder restar sería peor que no restar.
+
+**Un número no es un monto por estar cerca de la palabra "deuda".** "deuda de
+patente 2024 y 2025" son los AÑOS que se adeudan, no 2024 dólares. Un número de
+cuatro cifras en rango de año y sin símbolo de moneda se descarta — pero
+"deuda de u$s 2000" y "deuda de 2.024 pesos" sí son plata.
+
+El redondeo al netear va siempre para abajo: redondear 5.975 a 6.000 devolvería
+parte de la deuda que se acaba de descontar.
 
 ### La trampa de los financiados
 
