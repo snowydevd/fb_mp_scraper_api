@@ -148,3 +148,28 @@ CREATE INDEX IF NOT EXISTS contact_queue_status_idx ON contact_queue (status, cr
 ALTER TABLE contact_queue DROP CONSTRAINT IF EXISTS contact_queue_status_check;
 ALTER TABLE contact_queue ADD CONSTRAINT contact_queue_status_check
   CHECK (status IN ('pending', 'approved', 'discarded', 'sent'));
+
+-- Row Level Security ---------------------------------------------------------
+--
+-- Supabase publica por PostgREST toda tabla del schema `public`, y la anon key
+-- es pública por diseño: sin RLS, cualquiera con esa key lee y escribe estas
+-- tablas, incluida contact_queue. Las tablas creadas por SQL (como estas)
+-- arrancan con RLS apagado — sólo las creadas desde la UI vienen con RLS puesto.
+--
+-- Se activa SIN políticas a propósito: sin una policy que lo permita, PostgREST
+-- no devuelve nada a `anon` ni a `authenticated`. El pipeline no se ve afectado
+-- porque no pasa por PostgREST: repo.mjs abre una conexión Postgres directa con
+-- DATABASE_URL, y ese rol es el DUEÑO de estas tablas. Un dueño saltea RLS.
+--
+-- Por eso mismo NO se usa FORCE ROW LEVEL SECURITY: haría que el dueño también
+-- quede sujeto a las políticas, y el worker dejaría de poder escribir.
+--
+-- Si algún día se conecta con un rol que no sea el dueño, hay que escribirle
+-- políticas explícitas o darle BYPASSRLS.
+ALTER TABLE listings         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE price_history    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sellers          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE raw_snapshots    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reference_prices ENABLE ROW LEVEL SECURITY;
+ALTER TABLE listing_scores   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE contact_queue    ENABLE ROW LEVEL SECURITY;

@@ -383,6 +383,34 @@ cachea — es una propiedad del batch de esa corrida, no del mercado. Si
 MercadoLibre falla, se deja de intentar por el resto de la corrida en vez de
 gastar un token request por listing.
 
+### Supabase: RLS y string de conexión
+
+**Activá RLS.** Supabase publica por PostgREST (`/rest/v1/`) toda tabla del
+schema `public`, y la anon key es pública por diseño. Las tablas creadas por SQL
+—como estas— arrancan con RLS **apagado**; sólo las creadas desde la UI vienen
+con RLS puesto. Sin RLS, cualquiera con la anon key lee y escribe `listings`,
+`sellers` y `contact_queue`.
+
+`schema.sql` ya lo hace: `ENABLE ROW LEVEL SECURITY` en las 7 tablas y **cero
+políticas**. Sin una policy que lo permita, PostgREST no le devuelve nada a
+`anon` ni a `authenticated`. El pipeline no se entera, porque no pasa por
+PostgREST: `repo.mjs` abre una conexión Postgres directa con `DATABASE_URL`, y
+ese rol es el **dueño** de las tablas — un dueño saltea RLS.
+
+Por eso mismo **no** se usa `FORCE ROW LEVEL SECURITY`: sujetaría también al
+dueño a unas políticas que no existen, y el worker perdería su propia escritura.
+Si alguna vez te conectás con un rol que no sea el dueño, hay que escribirle
+políticas explícitas.
+
+Hay dos tests de integración que lo cubren: uno verifica que las 7 tablas tengan
+`relrowsecurity` y ninguna `relforcerowsecurity`, y otro crea un rol que no es
+dueño y comprueba que RLS lo bloquea incluso con `GRANT SELECT` encima.
+
+Sobre el string de conexión: para `npm run migrate` usá el **directo**
+(puerto 5432), no el pooler en modo transacción (6543). El pooler está pensado
+para queries cortas y el schema se aplica como un solo bloque multi-sentencia.
+Para el worker sirven los dos.
+
 ### Cola de contacto
 
 La oferta se ancla a la **mediana de mercado**, nunca a un porcentaje fijo del

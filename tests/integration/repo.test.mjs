@@ -229,3 +229,53 @@ test("saveSnapshot stores the raw payload for re-parsing without re-scraping", o
   assert.equal(rows[0].payload[0].title, "x");
   assert.equal(rows[0].filters.minPrice, 5000);
 });
+
+// Supabase publishes every table in `public` through PostgREST, and the anon
+// key is public by design. Tables created by SQL start with RLS OFF, so this is
+// the check that the schema does not quietly ship an open contact_queue.
+test("every table has RLS enabled, and none of them forces it on the owner", opts, async () => {
+  const { rows } = await pool.query(
+    `SELECT relname, relrowsecurity, relforcerowsecurity
+       FROM pg_class
+      WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'
+      ORDER BY relname`
+  );
+  assert.ok(rows.length >= 7, `expected the pipeline's tables, got ${rows.length}`);
+  for (const t of rows) {
+    assert.equal(t.relrowsecurity, true, `${t.relname} is exposed: RLS is off`);
+    // FORCE would subject the owner to the policies too - and there are none,
+    // so the worker would lose its own write access.
+    assert.equal(t.relforcerowsecurity, false, `${t.relname} forces RLS: the worker cannot write`);
+  }
+});
+
+test("RLS with no policies denies a non-owner while the worker keeps writing", opts, async () => {
+  // Stand in for Supabase's `anon`: a role that is not the table owner.
+  await pool.query(`DROP ROLE IF EXISTS test_anon`);
+  await pool.query(`CREATE ROLE test_anon NOLOGIN`);
+  await pool.query(`GRANT USAGE ON SCHEMA public TO test_anon`);
+  await pool.query(`GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO test_anon`);
+
+  const client = await pool.connect();
+  try {
+    await client.query("SET ROLE test_anon");
+    const seen = await client.query("SELECT * FROM contact_queue");
+    assert.equal(seen.rowCount, 0, "even with GRANT SELECT, RLS with no policy returns nothing");
+    await assert.rejects(
+      () => client.query("INSERT INTO sellers (seller_id) VALUES ('injected')"),
+      /row-level security/i
+    );
+    await client.query("RESET ROLE");
+  } finally {
+    client.release();
+  }
+
+  // And the owner - the role the worker connects as - is unaffected.
+  await repo.upsertListings([listing({ id: "100000000000009", url: "https://x/9" })]);
+  const { rows } = await pool.query("SELECT count(*)::int n FROM listings WHERE id = $1", ["100000000000009"]);
+  assert.equal(rows[0].n, 1);
+
+  await pool.query(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM test_anon`);
+  await pool.query(`REVOKE USAGE ON SCHEMA public FROM test_anon`);
+  await pool.query(`DROP ROLE IF EXISTS test_anon`);
+});
