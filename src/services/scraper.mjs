@@ -5,20 +5,27 @@ import { chromium } from "playwright";
 // ---------------------------------------------------------------------------
 
 const SELECTORS = {
-  // Listing cards are anchors pointing at /marketplace/item/<id>
+  // Listing cards are anchors pointing at /marketplace/item/<id>. The anchor
+  // itself wraps the whole card (image + price + title + location), so it is
+  // the extraction root: any ancestor lookup ("closest div[style*=max-width]")
+  // resolves to a different element run to run and shreds the text layout.
   item: 'a[href*="/marketplace/item/"]',
-  // Container around the anchor that holds the visible price/title text
-  itemContainer: 'div[style*="max-width"]',
   loginForm: 'input[name="pass"], form[action*="/login"]',
+  // Chrome that only the real Marketplace search page renders. Its presence
+  // proves we are past any login wall even while zero results are on screen.
+  marketplaceShell: '[aria-label*="Marketplace" i], a[href*="/marketplace/create"]',
 };
 
-// Empty-state copy varies by locale; cover es/en variants
+// Empty-state copy varies by locale; cover es/en variants. es-UY renders
+// "No se han encontrado publicaciones para ..." - the intervening "han" is why
+// a bare /no se encontr/ missed it and every empty search burned the full
+// outcome budget before falling through.
 const EMPTY_STATE_RE =
-  /no (?:hay|encontramos|se encontr)|couldn'?t find|no (?:listings|results)|nothing (?:was )?found/i;
+  /no se (?:han? )?encontrad|no (?:hay|encontramos)|sin resultados|couldn'?t find|didn'?t find|no (?:listings|results)|nothing (?:was )?found/i;
 
-// Login-wall copy shown when FB demands a session (URL may stay unchanged)
-const LOGIN_TEXT_RE =
-  /inicia(?:r)? sesi[oó]n|log in to facebook|create new account|crear cuenta nueva|conn?ectate/i;
+// Copy proving the Marketplace search UI rendered (not a login wall).
+const SHELL_TEXT_RE =
+  /resultados de la b[u\u00fa]squeda|search results|filtros|filters|crear publicaci[o\u00f3]n|create new listing/i;
 
 const TIMEOUTS = {
   navigationMs: intEnv("SCRAPER_NAV_TIMEOUT_MS", 30_000),
@@ -55,7 +62,10 @@ export class ScraperError extends Error {
 
 function log(level, msg, extra) {
   const out = level === "error" ? console.error : console.log;
-  out(`[scraper] ${new Date().toISOString()} ${level.toUpperCase()} ${msg}`, extra ?? "");
+  out(
+    `[scraper] ${new Date().toISOString()} ${level.toUpperCase()} ${msg}`,
+    extra ?? "",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +148,8 @@ function sessionConfig() {
 async function newSessionContext(browser) {
   const session = sessionConfig();
   const options = { locale: "es-ES" };
-  if (session.kind === "storageState") options.storageState = session.storageState;
+  if (session.kind === "storageState")
+    options.storageState = session.storageState;
   const context = await browser.newContext(options);
   if (session.kind === "cookies") await context.addCookies(session.cookies);
   return { context, hasSession: session.kind !== "none" };
@@ -165,9 +176,17 @@ function buildSearchUrl(query, location, minPrice, maxPrice) {
 export async function waitForOutcome(page, { mainStatus } = {}) {
   // On an HTTP error page nothing more will render; don't wait the full budget
   const budget =
-    mainStatus != null && mainStatus >= 400 ? Math.min(TIMEOUTS.outcomeMs, 4000) : TIMEOUTS.outcomeMs;
+    mainStatus != null && mainStatus >= 400
+      ? Math.min(TIMEOUTS.outcomeMs, 4000)
+      : TIMEOUTS.outcomeMs;
   const deadline = Date.now() + budget;
   let snapshot = null;
+  // Anonymous Marketplace always ships "Iniciar sesión" text AND a login form
+  // in the page chrome, even on scrapes that succeed. Neither is evidence of a
+  // login wall on its own, so a wall is only called when the Marketplace shell
+  // is absent — i.e. the login form is the page rather than a widget on it.
+  let sawShell = false;
+
   while (Date.now() < deadline) {
     try {
       snapshot = await page.evaluate((sel) => {
@@ -175,6 +194,7 @@ export async function waitForOutcome(page, { mainStatus } = {}) {
           url: location.href,
           hasItems: !!document.querySelector(sel.item),
           hasLoginForm: !!document.querySelector(sel.loginForm),
+          hasShell: !!document.querySelector(sel.marketplaceShell),
           bodyText: (document.body?.innerText || "").slice(0, 8000),
         };
       }, SELECTORS);
@@ -182,19 +202,27 @@ export async function waitForOutcome(page, { mainStatus } = {}) {
       // Execution context destroyed mid-navigation; retry on next tick
       snapshot = null;
     }
+
     if (snapshot) {
-      if (/\/(checkpoint|captcha)/.test(snapshot.url)) return { state: "blocked", snapshot };
+      const shell = snapshot.hasShell || SHELL_TEXT_RE.test(snapshot.bodyText);
+      if (shell) sawShell = true;
+
+      if (/\/(checkpoint|captcha)/.test(snapshot.url))
+        return { state: "blocked", snapshot };
       if (snapshot.hasItems) return { state: "items", snapshot };
-      if (
-        /\/login/.test(snapshot.url) ||
-        snapshot.hasLoginForm ||
-        LOGIN_TEXT_RE.test(snapshot.bodyText)
-      )
+      // A real wall: FB navigated us to /login, or served a login form on a
+      // page with no Marketplace UI at all.
+      if (/\/login/.test(snapshot.url) || (snapshot.hasLoginForm && !shell))
         return { state: "login", snapshot };
-      if (EMPTY_STATE_RE.test(snapshot.bodyText)) return { state: "empty", snapshot };
+      if (EMPTY_STATE_RE.test(snapshot.bodyText))
+        return { state: "empty", snapshot };
     }
     await page.waitForTimeout(500);
   }
+
+  // Budget spent with the search UI on screen and no cards: a genuine
+  // zero-result search whose empty-state copy we don't recognise.
+  if (sawShell) return { state: "empty", snapshot };
   return { state: "unknown", snapshot };
 }
 
@@ -216,70 +244,140 @@ async function scrollToLoadMore(page) {
  * Exported separately so parsing can be tested against HTML fixtures.
  */
 export async function extractItems(page) {
-  const raw = await page.$$eval(
-    SELECTORS.item,
-    (anchors, containerSel) => {
-      // A price line starts with a currency marker ("$ 1.500", "U$S 200",
-      // "UYU 3.000", "€50") or is a free-item label. Anchored at the start so
-      // titles like "Suzuki 125" never match.
-      const PRICE_RE = /^(?:UYU|U\$S|US\$|USD|\$U|R\$|\$|€|£)\s*[\d.,]+/i;
-      const FREE_RE = /^(?:gratis|free)$/i;
-      const isPrice = (s) => PRICE_RE.test(s) || FREE_RE.test(s);
-      const parseAmount = (s) => {
-        if (s == null) return null;
-        if (FREE_RE.test(s)) return 0;
-        const digits = s.replace(/[^\d]/g, "");
-        return digits ? parseInt(digits, 10) : null;
+  const raw = await page.$$eval(SELECTORS.item, (anchors) => {
+    // -- price grammar ------------------------------------------------------
+    // FB renders the currency as a SUFFIX in es-UY ("2800 $U", "20 000 $U")
+    // and as a prefix elsewhere ("$ 1.500", "USD 200"), and separates
+    // thousands with NBSP. Normalise the spaces, then accept either side.
+    const CUR = "UYU|U\\$S|US\\$|USD|AR\\$|R\\$|\\$U|\\$|€|£";
+    const NUM = "\\d[\\d.,\\s]*";
+    const PRICE_RE = new RegExp(
+      `^(?:(?:${CUR})\\s*${NUM}|${NUM}\\s*(?:${CUR}))$`,
+      "i"
+    );
+    const FREE_RE = /^(?:gratis|free)$/i;
+    const CURRENCIES = [
+      [/UYU|\$U/i, "UYU"],
+      [/U\$S|US\$|USD/i, "USD"],
+      [/AR\$/i, "ARS"],
+      [/R\$/i, "BRL"],
+      [/€/, "EUR"],
+      [/£/, "GBP"],
+    ];
+
+    // NBSP / narrow-NBSP / thin space -> plain space, then collapse
+    const norm = (v) =>
+      (v == null ? "" : String(v))
+        .replace(/[   ]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const isPrice = (v) => {
+      const t = norm(v);
+      return !!t && (PRICE_RE.test(t) || FREE_RE.test(t));
+    };
+
+    const currencyOf = (v) => {
+      const t = norm(v);
+      if (!t || FREE_RE.test(t)) return null;
+      for (const [re, code] of CURRENCIES) if (re.test(t)) return code;
+      return null; // a bare "$" is genuinely ambiguous; don't guess
+    };
+
+    const parseAmount = (v) => {
+      const t = norm(v);
+      if (!t) return null;
+      if (FREE_RE.test(t)) return 0;
+      const stripped = t
+        .replace(new RegExp(CUR, "gi"), "")
+        // drop a 2-digit decimal tail ("1.500,50" -> "1.500"); leaves
+        // thousand groups ("1.500", "20 000") untouched
+        .replace(/[.,](\d{2})\s*$/, "");
+      const digits = stripped.replace(/\D/g, "");
+      return digits ? parseInt(digits, 10) : null;
+    };
+
+    // -- aria-label: the reliable source ------------------------------------
+    // Every card carries "<title>, <price>, [reducido desde <old>,] <location>,
+    // publicación <id>". Parsing it beats splitting innerText, which also picks
+    // up badges ("Recién publicado") and collapses to one line at random.
+    const ID_TAIL_RE = /,\s*(?:publicación|publicacion|listing|post|anuncio)\s*\d+\s*$/i;
+    const OLD_PRICE_RE = /^(?:reducido desde|reduced from|antes|was)\s+(.+)$/i;
+
+    const fromAria = (aria) => {
+      const body = norm(aria).replace(ID_TAIL_RE, "");
+      if (!body) return null;
+      const segs = body.split(/\s*,\s*/).filter(Boolean);
+      if (segs.length < 2) return null;
+
+      // The title is never empty, so the price is never segment 0. That guard
+      // also stops a title that reads like a price ("Bicicleta $1500") from
+      // being mistaken for the price field.
+      let i = -1;
+      for (let k = 1; k < segs.length; k++) {
+        if (isPrice(segs[k])) {
+          i = k;
+          break;
+        }
+      }
+      if (i === -1) return null;
+
+      // Title and location are re-joined, so commas inside them survive
+      // ("Colonia Nicolich, Canelones, Uruguay").
+      const title = segs.slice(0, i).join(", ") || null;
+      const priceRaw = segs[i];
+      let j = i + 1;
+      let oldPriceRaw = null;
+      const discount = segs[j] ? segs[j].match(OLD_PRICE_RE) : null;
+      if (discount && isPrice(discount[1])) {
+        oldPriceRaw = norm(discount[1]);
+        j++;
+      }
+      return { title, priceRaw, oldPriceRaw, location: segs.slice(j).join(", ") || null };
+    };
+
+    // -- innerText fallback, for cards that ever ship without aria-label ----
+    const BADGE_RE =
+      /^(?:recién publicado|recien publicado|just listed|nuevo|new|patrocinado|sponsored)$/i;
+
+    const fromLines = (anchor) => {
+      const lines = (anchor.innerText || "")
+        .split(/\r?\n/)
+        .map(norm)
+        .filter((t) => t && !BADGE_RE.test(t));
+      if (!lines.length) return null;
+
+      const i = lines.findIndex(isPrice);
+      if (i === -1) return { title: lines[0] || null, priceRaw: null, oldPriceRaw: null, location: lines[1] || null };
+
+      const priceRaw = lines[i];
+      const rest = lines.slice(i + 1);
+      // A second consecutive price line is the struck-through original
+      const oldPriceRaw = rest[0] && isPrice(rest[0]) ? rest.shift() : null;
+      return { title: rest[0] || null, priceRaw, oldPriceRaw, location: rest[1] || null };
+    };
+
+    return anchors.map((anchor) => {
+      const parsed = fromAria(anchor.getAttribute("aria-label")) || fromLines(anchor) || {};
+      const idMatch = anchor.href.match(/\/marketplace\/item\/(\d+)/);
+      const priceRaw = parsed.priceRaw || null;
+
+      return {
+        id: idMatch ? idMatch[1] : null,
+        title: parsed.title || norm(anchor.querySelector("img")?.alt) || null,
+        price: parseAmount(priceRaw),
+        priceRaw,
+        currency: currencyOf(priceRaw),
+        oldPrice: parseAmount(parsed.oldPriceRaw),
+        oldPriceRaw: parsed.oldPriceRaw || null,
+        location: parsed.location || null,
+        thumbnail: anchor.querySelector("img")?.src || null,
+        url: idMatch
+          ? `https://www.facebook.com/marketplace/item/${idMatch[1]}/`
+          : anchor.href,
       };
-
-      return anchors.map((anchor) => {
-        const container = anchor.closest(containerSel) || anchor;
-        const lines = (container.innerText || "")
-          .split(/\r?\n/)
-          .map((t) => t.trim())
-          .filter(Boolean);
-
-        let priceRaw = null;
-        let oldPriceRaw = null;
-        let title = null;
-        let locationText = null;
-
-        const priceIdx = lines.findIndex(isPrice);
-        if (priceIdx !== -1) {
-          priceRaw = lines[priceIdx];
-          const rest = lines.slice(priceIdx + 1);
-          // A second consecutive price line is the strikethrough old price
-          if (rest[0] && isPrice(rest[0])) oldPriceRaw = rest.shift();
-          title = rest[0] || null;
-          locationText = rest[1] || null;
-        } else {
-          title = lines[0] || null;
-          locationText = lines[1] || null;
-        }
-        if (!title) {
-          title =
-            anchor.getAttribute("aria-label") ||
-            container.querySelector("img")?.alt ||
-            null;
-        }
-
-        const idMatch = anchor.href.match(/\/marketplace\/item\/(\d+)/);
-        return {
-          id: idMatch ? idMatch[1] : null,
-          title,
-          price: parseAmount(priceRaw),
-          priceRaw,
-          oldPriceRaw,
-          location: locationText,
-          thumbnail: container.querySelector("img")?.src || null,
-          url: idMatch
-            ? `https://www.facebook.com/marketplace/item/${idMatch[1]}/`
-            : anchor.href,
-        };
-      });
-    },
-    SELECTORS.itemContainer
-  );
+    });
+  });
 
   // FB renders duplicate anchors for the same listing; keep the first of each
   const seen = new Set();
@@ -297,7 +395,10 @@ async function doScrape(query, location, minPrice, maxPrice) {
   const { context, hasSession } = await newSessionContext(browser);
   try {
     const page = await context.newPage();
-    log("info", `navigating query="${query}" location="${location}" session=${hasSession}`);
+    log(
+      "info",
+      `navigating query="${query}" location="${location}" session=${hasSession}`,
+    );
 
     let response;
     try {
@@ -309,12 +410,14 @@ async function doScrape(query, location, minPrice, maxPrice) {
       throw new ScraperError(
         ERROR_CODES.NAV_FAILED,
         `Navigation to Marketplace failed: ${err.message.split("\n")[0]}`,
-        { url }
+        { url },
       );
     }
 
     const status = response?.status();
-    const { state, snapshot } = await waitForOutcome(page, { mainStatus: status });
+    const { state, snapshot } = await waitForOutcome(page, {
+      mainStatus: status,
+    });
     const meta = {
       url,
       finalUrl: snapshot?.url,
@@ -329,13 +432,13 @@ async function doScrape(query, location, minPrice, maxPrice) {
           hasSession
             ? "Facebook redirected to login: the configured session is expired or invalid. Refresh FB_COOKIES / FB_STORAGE_STATE."
             : "Facebook requires a logged-in session for Marketplace from this IP. Configure FB_COOKIES or FB_STORAGE_STATE.",
-          meta
+          meta,
         );
       case "blocked":
         throw new ScraperError(
           ERROR_CODES.BLOCKED,
           "Facebook served a captcha/checkpoint page (bot detection).",
-          meta
+          meta,
         );
       case "empty":
         log("info", `no results for query="${query}"`, meta.finalUrl);
@@ -345,13 +448,13 @@ async function doScrape(query, location, minPrice, maxPrice) {
           throw new ScraperError(
             ERROR_CODES.NAV_FAILED,
             `Facebook returned HTTP ${status} for the search page.`,
-            meta
+            meta,
           );
         }
         throw new ScraperError(
           ERROR_CODES.DOM_CHANGED,
           `Page loaded but no known markers (items, login, empty-state) appeared within ${TIMEOUTS.outcomeMs}ms. Selectors may be outdated.`,
-          meta
+          meta,
         );
     }
 
@@ -360,6 +463,8 @@ async function doScrape(query, location, minPrice, maxPrice) {
 
     // FB already filtered via URL params; re-check locally as a guarantee.
     // Items without a parseable price are dropped only when a bound is set.
+    // Bounds are compared against the raw number, so on a page mixing UYU and
+    // USD cards they mean "whatever `currency` says" — same as FB's own filter.
     const filtered = items.filter((item) => {
       if (item.price == null) return minPrice == null && maxPrice == null;
       if (minPrice != null && item.price < minPrice) return false;
@@ -367,7 +472,10 @@ async function doScrape(query, location, minPrice, maxPrice) {
       return true;
     });
 
-    log("info", `extracted ${items.length} items (${filtered.length} after price filter)`);
+    log(
+      "info",
+      `extracted ${items.length} items (${filtered.length} after price filter)`,
+    );
     return filtered;
   } finally {
     await context.close().catch(() => {});
@@ -384,7 +492,12 @@ async function doScrape(query, location, minPrice, maxPrice) {
  * @returns {Promise<Array<{id, title, price, priceRaw, oldPriceRaw, location, thumbnail, url}>>}
  * @throws {ScraperError} with a `code` from ERROR_CODES on any failure
  */
-export async function scrapeMarketplace(searchQuery, location = "montevideo", minPrice, maxPrice) {
+export async function scrapeMarketplace(
+  searchQuery,
+  location = "montevideo",
+  minPrice,
+  maxPrice,
+) {
   const query = String(searchQuery ?? "").trim();
   if (!query) throw new TypeError("searchQuery is required");
   return withSlot(() => doScrape(query, location, minPrice, maxPrice));

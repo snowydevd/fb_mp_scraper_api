@@ -12,6 +12,8 @@ interface Listing {
   title: string | null;
   price: number | null;
   priceRaw: string | null;
+  currency: string | null;
+  oldPrice: number | null;
   oldPriceRaw: string | null;
   location: string | null;
   thumbnail: string | null;
@@ -30,6 +32,8 @@ const listingSchema = z.object({
   title: z.string().nullable(),
   price: z.number().nullable(),
   priceRaw: z.string().nullable(),
+  currency: z.string().nullable(),
+  oldPrice: z.number().nullable(),
   oldPriceRaw: z.string().nullable(),
   location: z.string().nullable(),
   thumbnail: z.string().nullable(),

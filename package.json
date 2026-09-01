@@ -6,13 +6,16 @@
   "scripts": {
     "start": "node src/main.mjs",
     "dev": "npx nodemon src/main.mjs",
-    "build": "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 yarn install"
+    "worker": "node src/worker/sync.mjs",
+    "worker:dry": "node src/worker/sync.mjs --dry",
+    "migrate": "node -e \"import('./src/db/repo.mjs').then(m=>m.migrate().then(()=>{console.log('schema aplicado');process.exit(0)}))\"",
+    "test": "node --test tests/unit/scorer.test.mjs tests/unit/offer.test.mjs"
   },
   "dependencies": {
-    "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "pg": "^8.13.0",
     "playwright": "^1.55.0"
   }
 }
