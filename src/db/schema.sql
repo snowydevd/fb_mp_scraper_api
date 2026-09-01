@@ -173,3 +173,33 @@ ALTER TABLE raw_snapshots    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reference_prices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE listing_scores   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contact_queue    ENABLE ROW LEVEL SECURITY;
+
+-- Data API (PostgREST) -------------------------------------------------------
+--
+-- Este pipeline NUNCA usa la Data API: repo.mjs abre una conexión Postgres
+-- directa. O sea que `anon` y `authenticated` no tienen por qué ver estas
+-- tablas, y el candado más barato es no darles el permiso.
+--
+-- Esto es un segundo candado, INDEPENDIENTE del RLS de arriba: sin GRANT,
+-- PostgREST corta con `permission denied` antes de que RLS entre a jugar. Uno
+-- solo alcanzaría; los dos hacen que un error de configuración no baste.
+--
+-- Va en el schema y no en el toggle "expose new tables" del dashboard a
+-- propósito: el toggle no está versionado, no se revisa en un diff y se puede
+-- volver a prender sin que nadie se entere. `migrate()` es idempotente, así que
+-- esto se re-aplica en cada corrida.
+--
+-- Los roles sólo existen en Supabase; en un Postgres común esto es un no-op.
+DO $$
+DECLARE r text;
+BEGIN
+  FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+      EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', r);
+      EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', r);
+      -- Y que las tablas futuras tampoco nazcan con permiso.
+      EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM %I', r);
+      EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %I', r);
+    END IF;
+  END LOOP;
+END $$;
