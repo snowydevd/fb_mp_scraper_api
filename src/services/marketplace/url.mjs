@@ -32,7 +32,10 @@ export const KNOWN_LOCATIONS = new Set([
   "salto",
   "paysandu",
   "rivera",
-  "lasPiedras",
+  // Lowercase only: normalizeVehicleFilters folds the caller's input to
+  // lowercase before this lookup, so a camelCase entry here ("lasPiedras")
+  // could never be matched and silently rejected a valid location.
+  "laspiedras",
   "ciudaddelacosta",
 ]);
 

@@ -1,13 +1,12 @@
-
-# Playwright
 node_modules/
-/test-results/
-/playwright-report/
-/blob-report/
-/playwright/.cache/
-
-
 .env
 
 # MCP server build output
 mcp-server/dist/
+
+# Editor scratch
+.vscode/
+mcp-server/.vscode/
+
+# Facebook session state - cookies, never commit
+storage-state*.json

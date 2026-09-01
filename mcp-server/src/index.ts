@@ -88,39 +88,10 @@ server.registerTool(
     if (location != null) params.set("location", location);
     if (minPrice != null) params.set("minPrice", String(minPrice));
     if (maxPrice != null) params.set("maxPrice", String(maxPrice));
-    const url = `${API_URL}/api/marketplace?${params.toString()}`;
 
-    let response: Response;
-    try {
-      response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return toolError(
-        "API_UNREACHABLE",
-        `Could not reach the scraper API at ${API_URL}: ${reason}. Is it running?`
-      );
-    }
-
-    let body: SearchOk | ApiError;
-    try {
-      body = (await response.json()) as SearchOk | ApiError;
-    } catch {
-      return toolError(
-        "BAD_API_RESPONSE",
-        `Scraper API returned a non-JSON response (HTTP ${response.status}).`
-      );
-    }
-
-    if (!response.ok || "error" in body) {
-      const apiError = "error" in body ? body.error : { code: `HTTP_${response.status}`, message: "" };
-      return toolError(apiError.code, apiError.message || `Scraper API returned HTTP ${response.status}.`);
-    }
-
-    const structuredContent = { count: body.count, items: body.items };
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
-      structuredContent,
-    };
+    const body = await apiGet<SearchOk>("/api/marketplace", params);
+    if (isToolError(body)) return body;
+    return ok({ count: body.count, items: body.items });
   }
 );
 
@@ -130,6 +101,140 @@ function toolError(code: string, message: string) {
     isError: true,
   };
 }
+
+/**
+ * One GET against the API, with the same error taxonomy for every tool. The
+ * API's own `{error:{code,message}}` envelope is passed through unchanged so a
+ * caller sees LOGIN_REQUIRED or NO_DATABASE rather than a bare HTTP number.
+ */
+async function apiGet<T>(path: string, params: URLSearchParams): Promise<T | ReturnType<typeof toolError>> {
+  const qs = params.toString();
+  const url = `${API_URL}${path}${qs ? `?${qs}` : ""}`;
+
+  let response: Response;
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return toolError("API_UNREACHABLE", `Could not reach the scraper API at ${API_URL}: ${reason}. Is it running?`);
+  }
+
+  let body: T | ApiError;
+  try {
+    body = (await response.json()) as T | ApiError;
+  } catch {
+    return toolError("BAD_API_RESPONSE", `Scraper API returned a non-JSON response (HTTP ${response.status}).`);
+  }
+
+  if (!response.ok || (body != null && typeof body === "object" && "error" in body)) {
+    const apiError = body != null && typeof body === "object" && "error" in body
+      ? (body as ApiError).error
+      : { code: `HTTP_${response.status}`, message: "" };
+    return toolError(apiError.code, apiError.message || `Scraper API returned HTTP ${response.status}.`);
+  }
+  return body as T;
+}
+
+const isToolError = (v: unknown): v is ReturnType<typeof toolError> =>
+  typeof v === "object" && v !== null && "isError" in v;
+
+const ok = <T extends object>(structuredContent: T) => ({
+  content: [{ type: "text" as const, text: JSON.stringify(structuredContent, null, 2) }],
+  structuredContent,
+});
+
+// ---------------------------------------------------------------------------
+// The pipeline's actual output. search_marketplace above is the old keyword
+// path (it returns whatever text matches - toys included); these two serve the
+// scored ranking and the contact queue that the worker produces.
+// ---------------------------------------------------------------------------
+
+const opportunitySchema = z.object({
+  id: z.string(),
+  title: z.string().nullable(),
+  price: z.union([z.string(), z.number()]).nullable(),
+  currency_resolved: z.string().nullable(),
+  city: z.string().nullable(),
+  url: z.string(),
+  listed_at: z.string().nullable(),
+  mileage_km: z.number().nullable(),
+  vehicle_year: z.number().nullable(),
+  make: z.string().nullable(),
+  model: z.string().nullable(),
+  score: z.union([z.string(), z.number()]),
+  version: z.string(),
+  breakdown: z.unknown(),
+  is_dealer: z.boolean().nullable(),
+  contact_status: z.string().nullable(),
+}).passthrough();
+
+server.registerTool(
+  "list_opportunities",
+  {
+    title: "List scored buying opportunities",
+    description:
+      "The ranked opportunities the worker has scored, best first. Reads the " +
+      "database - it never scrapes Facebook, so it is free to call. Every row " +
+      "carries the full score `breakdown`, so a ranking can always be " +
+      "explained subscore by subscore. Dealerships are excluded by default: " +
+      "they price at retail and there is no margin to negotiate.",
+    inputSchema: {
+      limit: z.number().int().positive().max(200).optional().describe("Max rows (default 50)"),
+      minScore: z.number().optional().describe("Only listings scoring at or above this (-1 to 1)"),
+      includeDealers: z.boolean().optional().describe("Include listings identified as dealerships (default false; for auditing the filter)"),
+    },
+    outputSchema: { count: z.number().int(), items: z.array(opportunitySchema) },
+  },
+  async ({ limit, minScore, includeDealers }) => {
+    const params = new URLSearchParams();
+    if (limit != null) params.set("limit", String(limit));
+    if (minScore != null) params.set("minScore", String(minScore));
+    if (includeDealers) params.set("includeDealers", "1");
+    const body = await apiGet<{ count: number; items: unknown[] }>("/api/opportunities", params);
+    if (isToolError(body)) return body;
+    return ok({ count: body.count, items: body.items as z.infer<typeof opportunitySchema>[] });
+  }
+);
+
+const contactEntrySchema = z.object({
+  id: z.number(),
+  listing_id: z.string(),
+  suggested_offer: z.union([z.string(), z.number()]),
+  currency: z.string(),
+  rationale: z.unknown(),
+  message_draft: z.string(),
+  status: z.string(),
+  title: z.string().nullable(),
+  url: z.string(),
+}).passthrough();
+
+server.registerTool(
+  "list_contact_queue",
+  {
+    title: "List contact drafts awaiting review",
+    description:
+      "Suggested offers and message drafts for listings that cleared the " +
+      "threshold. NOTHING here has been sent: automated Messenger outreach is " +
+      "the fastest way to lose the account, so every entry waits for a person " +
+      "to approve and send it by hand. This tool is read-only by design - " +
+      "approving or discarding a draft is a human decision, made through " +
+      "PATCH /api/contact-queue/:id.",
+    inputSchema: {
+      status: z.enum(["pending", "approved", "discarded", "sent", "all"]).optional()
+        .describe("Which drafts to list (default: pending)"),
+      limit: z.number().int().positive().max(200).optional().describe("Max rows (default 50)"),
+    },
+    outputSchema: { count: z.number().int(), items: z.array(contactEntrySchema) },
+  },
+  async ({ status, limit }) => {
+    const params = new URLSearchParams();
+    if (status != null) params.set("status", status);
+    if (limit != null) params.set("limit", String(limit));
+    const body = await apiGet<{ count: number; items: unknown[] }>("/api/contact-queue", params);
+    if (isToolError(body)) return body;
+    return ok({ count: body.count, items: body.items as z.infer<typeof contactEntrySchema>[] });
+  }
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

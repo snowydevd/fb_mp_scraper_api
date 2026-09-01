@@ -1,4 +1,9 @@
-import { chromium } from "playwright";
+import {
+  getBrowser,
+  closeBrowser,
+  withPoliteSlot,
+  countListings,
+} from "./marketplace/browser.mjs";
 
 // ---------------------------------------------------------------------------
 // Config: selectors and tunables centralized so DOM changes are one-line fixes
@@ -33,7 +38,6 @@ const TIMEOUTS = {
   scrollPauseMs: 700,
 };
 const SCROLL_PASSES = intEnv("SCRAPER_SCROLL_PASSES", 3);
-const MAX_CONCURRENCY = intEnv("SCRAPER_MAX_CONCURRENCY", 2);
 
 function intEnv(name, fallback) {
   const n = parseInt(process.env[name], 10);
@@ -73,47 +77,14 @@ function log(level, msg, extra) {
 // bounded concurrency
 // ---------------------------------------------------------------------------
 
-let browserPromise = null;
-
-async function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = chromium.launch({ headless: true }).then((browser) => {
-      browser.on("disconnected", () => {
-        browserPromise = null;
-      });
-      return browser;
-    });
-    browserPromise.catch(() => {
-      browserPromise = null;
-    });
-  }
-  return browserPromise;
-}
-
-export async function closeBrowser() {
-  if (browserPromise) {
-    const p = browserPromise;
-    browserPromise = null;
-    await p.then((b) => b.close()).catch(() => {});
-  }
-}
-
-let activeSlots = 0;
-const slotQueue = [];
-
-async function withSlot(fn) {
-  if (activeSlots >= MAX_CONCURRENCY) {
-    await new Promise((resolve) => slotQueue.push(resolve));
-  }
-  activeSlots++;
-  try {
-    return await fn();
-  } finally {
-    activeSlots--;
-    const next = slotQueue.shift();
-    if (next) next();
-  }
-}
+// Browser lifecycle, concurrency and politeness all live in
+// marketplace/browser.mjs now. This module used to keep its own Chromium
+// singleton and its own slot queue - so the process ran two browsers, and the
+// keyword path had a concurrency cap with NO delay and NO session budget at
+// all: a loop against GET /api/marketplace hammered Facebook as fast as
+// Chromium could navigate, while the worker politely waited 8-20s per request.
+// Re-exported so existing importers (src/main.mjs) keep working.
+export { closeBrowser };
 
 // ---------------------------------------------------------------------------
 // Session: cookies from FB_STORAGE_STATE (Playwright storage state JSON path)
@@ -476,6 +447,9 @@ async function doScrape(query, location, minPrice, maxPrice) {
       "info",
       `extracted ${items.length} items (${filtered.length} after price filter)`,
     );
+    // Against the same session budget the worker draws from: one navigation
+    // that pulled 24 cards is not free just because it was a single request.
+    countListings(1);
     return filtered;
   } finally {
     await context.close().catch(() => {});
@@ -497,8 +471,12 @@ export async function scrapeMarketplace(
   location = "montevideo",
   minPrice,
   maxPrice,
+  opts = {},
 ) {
   const query = String(searchQuery ?? "").trim();
   if (!query) throw new TypeError("searchQuery is required");
-  return withSlot(() => doScrape(query, location, minPrice, maxPrice));
+  // withPoliteSlot, not a bare concurrency gate: it also applies the randomised
+  // 8-20s pause and enforces the per-process session budget, so the public
+  // endpoint can no longer outpace the worker's own rate limiting.
+  return withPoliteSlot(() => doScrape(query, location, minPrice, maxPrice), opts);
 }

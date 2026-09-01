@@ -83,3 +83,26 @@ test("mapDetail converts miles to kilometres", () => {
   });
   assert.ok(Math.abs(d.mileageKm - 100_000) < 50);
 });
+
+// Regression from the live run of 2026-09-01: the single draft produced read
+// "oferta USD 5990 (pide 5990)" - an offer to pay exactly the asking price.
+test("a car already under market gets a real offer, never the asking price back", () => {
+  const r = suggestOffer({ price: 5_990, currencyResolved: "USD" }, { median: 7_495, isReliable: true, sampleSize: 14, currency: "USD" });
+  assert.ok(r.ok);
+  assert.ok(r.offer < 5_990, `offered ${r.offer} against an asking price of 5990 - that is not an offer`);
+  assert.equal(r.anchoredTo, "asking_cash_discount");
+  assert.ok(r.gapFromAskingPct >= 2, "the discount has to be worth writing a message about");
+});
+
+test("the fallback discount does not override a genuine median anchor", () => {
+  const r = suggestOffer({ price: 14_000, currencyResolved: "USD" }, { median: 12_000, isReliable: true, sampleSize: 14, currency: "USD" });
+  assert.equal(r.anchoredTo, "market_median");
+  assert.equal(r.offer, 9_850);
+});
+
+test("the draft admits the price is fair instead of lowballing", () => {
+  const r = suggestOffer({ price: 5_990, currencyResolved: "USD" }, { median: 7_495, isReliable: true, sampleSize: 14, currency: "USD" });
+  const msg = draftMessage({ title: "Fiat Uno Way" }, r);
+  assert.match(msg, /razonable/);
+  assert.ok(!msg.includes("5.990"), "the draft must not quote the asking price back as the offer");
+});

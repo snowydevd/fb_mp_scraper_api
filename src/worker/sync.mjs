@@ -12,8 +12,10 @@ import { searchVehicles } from "../services/marketplace/search.mjs";
 import { fetchListingDetail } from "../services/marketplace/detail.mjs";
 import { closeBrowser, listingsUsed, log, BudgetExceededError } from "../services/marketplace/browser.mjs";
 import { referenceFromInternal, referenceFromMeli } from "../services/reference/reference-price.mjs";
+import { createReferenceCache } from "../services/reference/cache.mjs";
 import { MeliUnavailableError } from "../services/reference/meli.mjs";
 import { scoreV1, scoreV2 } from "../services/scoring/scorer.mjs";
+import { detectDealer, countBySellerInBatch } from "../services/scoring/dealer.mjs";
 import { buildContactEntry } from "../services/scoring/offer.mjs";
 
 /** Listings scoring at or above this get their detail page fetched (Fase 5). */
@@ -29,13 +31,42 @@ export const DEFAULT_FILTERS = {
 };
 
 /**
- * Market reference for one listing. MercadoLibre first; when its credentials
- * are missing or rejected, fall back to the median of comparable listings in
- * this same batch. The internal source is self-referential - it says how a car
- * compares to the rest of Facebook, not to fair value - so it is returned with
- * source: "internal" and the scorer down-weights a thin one automatically.
+ * How many active listings each seller in this batch has.
+ *
+ * The batch count is a floor, not the truth: it only sees the cars that made it
+ * into this page of results. When the database is available its count is the
+ * larger and more honest one, so the two are merged by max.
  */
-async function referenceFor(listing, batch) {
+async function sellerCounts(items, repo) {
+  const counts = countBySellerInBatch(items);
+  if (!repo) return counts;
+  const ids = [...counts.keys()];
+  for (const id of ids) {
+    try {
+      const n = await repo.countActiveBySeller(id);
+      if (n > counts.get(id)) counts.set(id, n);
+    } catch (err) {
+      log("error", `seller count failed for ${id}: ${err.message}`);
+    }
+  }
+  return counts;
+}
+
+/**
+ * Market reference for one listing. MercadoLibre first (cached by make/model/
+ * year band, so a run makes one call per band rather than one per listing);
+ * when its credentials are missing or rejected, fall back to the median of
+ * comparable listings in this same batch.
+ *
+ * Dealer listings are excluded from that fallback. They are priced at retail
+ * with margin baked in, and in the observed run four of the twenty-four
+ * listings were the same dealership - so the "market median" that decided the
+ * ranking was partly built from the very listings the pipeline exists to
+ * exclude. The internal source stays self-referential either way (it says how a
+ * car compares to the rest of Facebook, not to fair value), which is why it is
+ * returned with source: "internal" and down-weighted by the scorer when thin.
+ */
+async function referenceFor(listing, batch, { cache, dealerIds }) {
   const make = listing.make ?? null;
   const model = listing.model ?? null;
   const year = listing.vehicleYear ?? null;
@@ -44,20 +75,32 @@ async function referenceFor(listing, batch) {
 
   if (make && model) {
     try {
-      const ref = await referenceFromMeli({ make, model, ...band, currency });
-      if (ref.median) return ref;
+      const ref = await cache.lookup({ make, model, ...band, currency }, () =>
+        referenceFromMeli({ make, model, ...band, currency })
+      );
+      if (ref?.median) return ref;
     } catch (err) {
       if (!(err instanceof MeliUnavailableError)) throw err;
+      // One failure is enough: retrying per listing would cost a token request
+      // each time when the credentials are simply wrong.
+      cache.markUpstreamUnavailable(err.message);
       // fall through to internal
     }
   }
+
   const peers = batch.filter(
-    (b) => b.id !== listing.id && (b.currencyResolved ?? "USD") === currency && b.price != null
+    (b) =>
+      b.id !== listing.id &&
+      (b.currencyResolved ?? "USD") === currency &&
+      b.price != null &&
+      !dealerIds.has(b.id)
   );
-  return referenceFromInternal({ make, model, ...band, currency }, peers.map((p) => ({
+  const ref = referenceFromInternal({ make, model, ...band, currency }, peers.map((p) => ({
     price: p.price,
     currency_resolved: p.currencyResolved,
   })));
+  ref.excludedDealerPeers = batch.length - 1 - peers.length;
+  return ref;
 }
 
 export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}) {
@@ -79,40 +122,101 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
     log("info", `persisted: +${stats.inserted} new, ${stats.updated} updated, ${stats.priceChanges} price changes, ${deactivated} deactivated`);
   }
 
+  const cache = createReferenceCache({ repo, log });
+  const counts = await sellerCounts(items, repo);
+
+  // --- grid-level dealer pass -------------------------------------------
+  // The grid has no description, so this catches only what the title and the
+  // seller's own listing count give away ("… NOAHCARS"). Its job is to keep
+  // dealers out of the internal price reference, not to make a final verdict -
+  // that happens after the detail fetch, with the description in hand.
+  const dealerIds = new Set();
+  for (const it of items) {
+    const verdict = detectDealer({
+      title: it.title,
+      sellerActiveCount: it.sellerId ? counts.get(it.sellerId) ?? null : null,
+    });
+    it.sellerActiveCount = it.sellerId ? counts.get(it.sellerId) ?? null : null;
+    it.gridDealerVerdict = verdict;
+    if (verdict.isDealer) dealerIds.add(it.id);
+  }
+  if (dealerIds.size) {
+    log("info", `${dealerIds.size}/${items.length} listings look like dealers from the grid alone; excluded from the internal reference`);
+  }
+
   // --- Fase 4: score everything from grid data alone --------------------
   const scored = [];
   for (const it of items) {
-    const reference = await referenceFor(it, items);
+    const reference = await referenceFor(it, items, { cache, dealerIds });
     const result = scoreV1(it, reference);
     scored.push({ listing: it, reference, ...result });
     if (repo) await repo.saveScore({ listingId: it.id, score: result.score, version: "v1", breakdown: result.breakdown });
   }
   scored.sort((a, b) => b.score - a.score);
+  log("info", `reference cache: ${cache.stats.misses} lookups, ${cache.stats.memoHits} memo hits, ${cache.stats.dbHits} db hits, ${cache.stats.stored} stored`);
 
   // --- Fase 5: detail only for what cleared the threshold ---------------
   const candidates = scored.filter((s) => s.score >= DETAIL_THRESHOLD).slice(0, DETAIL_MAX_PER_RUN);
   log("info", `${candidates.length}/${scored.length} cleared the detail threshold (${DETAIL_THRESHOLD})`);
 
   const queue = [];
+  const rejected = [];
   for (const cand of candidates) {
     try {
       const detail = await fetchListingDetail(cand.listing.id, { skipDelay: dryRun });
-      const merged = { ...cand.listing, ...detail, id: cand.listing.id };
-      const reference = await referenceFor(merged, items);
+      const merged = {
+        ...cand.listing,
+        ...detail,
+        id: cand.listing.id,
+        sellerActiveCount:
+          (detail.sellerId ? counts.get(detail.sellerId) : null) ?? cand.listing.sellerActiveCount ?? null,
+      };
+      const reference = await referenceFor(merged, items, { cache, dealerIds });
       const v2 = scoreV2(merged, reference);
       cand.detail = merged;
       cand.v2 = v2;
-      if (repo) await repo.saveScore({ listingId: merged.id, score: v2.score, version: "v2", breakdown: v2.breakdown });
+
+      // Now that the description is in hand the dealer verdict is real; feed it
+      // back so the internal reference stops counting this listing as a peer.
+      if (v2.dealer?.isDealer) dealerIds.add(merged.id);
+
+      if (repo) {
+        // The detail fetch cost a rate-limited navigation. Everything it found
+        // is written back, including the dealer verdict, so a later run can
+        // skip the listing instead of paying for the same page again.
+        await repo.updateDetail(merged.id, {
+          ...detail,
+          isDealer: v2.dealer?.isDealer ?? null,
+          dealerScore: v2.dealer?.score ?? null,
+          dealerReasons: v2.dealer?.reasons ?? null,
+        });
+        await repo.saveScore({ listingId: merged.id, score: v2.score, version: "v2", breakdown: v2.breakdown });
+      }
 
       // --- Fase 6: draft, never send ---
-      // A disqualified listing (financed, so its advertised price is only the
-      // down payment) must not reach the queue either - contacting on a price
-      // that isn't the sale price wastes the approach.
+      // Two independent reasons to never reach the queue:
+      //   a financed listing advertises a down payment, so its price says
+      //   nothing about the car; a dealership has no margin to give.
+      // Both are checked here as well as inside the scorer: the weighted sum
+      // must never be able to rescue either back into the contact queue.
+      const dealer = v2.dealer;
       if (v2.disqualified) {
+        rejected.push({ id: merged.id, title: merged.title, reason: v2.disqualifiedBy.join(", ") });
         log("info", `skipping contact draft for ${merged.id}: ${v2.disqualifiedBy.join(", ")}`);
+      } else if (dealer?.isDealer) {
+        rejected.push({ id: merged.id, title: merged.title, reason: `automotora (${dealer.confidence}): ${dealer.reasons.join(", ")}` });
+        log("info", `skipping contact draft for ${merged.id}: dealer verdict ${dealer.confidence} (${dealer.reasons.join(", ")})`);
       } else {
         const entry = buildContactEntry({ ...merged, priceChangeCount: cand.listing.priceChangeCount }, reference);
-        if (entry.ok) queue.push(entry);
+        if (entry.ok) {
+          queue.push(entry);
+          if (repo) {
+            const written = await repo.enqueueContact(entry);
+            if (!written.written) log("info", `contact_queue kept as-is for ${entry.listingId}: ${written.reason}`);
+          }
+        } else {
+          rejected.push({ id: merged.id, title: merged.title, reason: entry.reason });
+        }
       }
     } catch (err) {
       if (err instanceof BudgetExceededError) { log("error", err.message); break; }
@@ -129,34 +233,43 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
     url,
     found: items.length,
     scored: scored.length,
+    gridDealers: dealerIds.size,
     detailFetched: candidates.length,
     queued: queue.length,
+    rejected: rejected.length,
+    referenceCache: cache.stats,
     listingsUsed: listingsUsed(),
     elapsedMs: Date.now() - started,
   };
   log("info", "sync done", summary);
-  return { summary, scored, queue };
+  return { summary, scored, queue, rejected };
 }
 
 // CLI entry
 if (import.meta.url === `file://${process.argv[1]}`) {
   const dryRun = process.argv.includes("--dry");
   runSync({ dryRun })
-    .then(({ summary, scored, queue }) => {
+    .then(({ summary, scored, queue, rejected }) => {
       console.log("\n=== RANKING (v1, y v2 donde hay detalle) ===");
       for (const s of scored.slice(0, 12)) {
         const v = s.v2 ?? s;
         const km = s.detail?.mileageKm ? `${(s.detail.mileageKm / 1000).toFixed(0)}k km` : "";
+        const flag = (s.v2?.dealer ?? s.listing.gridDealerVerdict)?.isDealer ? " [automotora]" : "";
         console.log(
           `${v.score.toFixed(3)} [${v.version}] ${String(s.listing.price).padStart(6)} ${s.listing.currencyResolved} ` +
-          `| ${(s.listing.title ?? "").slice(0, 38).padEnd(40)} ${km}`
+          `| ${(s.listing.title ?? "").slice(0, 38).padEnd(40)} ${km}${flag}`
         );
+      }
+      if (rejected.length) {
+        console.log("\n=== DESCARTADOS (no llegan a la cola) ===");
+        for (const r of rejected) console.log(`${r.id} | ${(r.title ?? "").slice(0, 40)} -> ${r.reason}`);
       }
       if (queue.length) {
         console.log("\n=== COLA DE CONTACTO (borradores, NO enviados) ===");
         for (const q of queue) {
           console.log(`\n${q.listingId} | oferta ${q.currency} ${q.suggestedOffer} (pide ${q.rationale.asking}, ` +
-            `mediana ${Math.round(q.rationale.marketMedian)}, expectativa ${q.rationale.acceptanceOutlook})`);
+            `mediana ${Math.round(q.rationale.marketMedian)}, expectativa ${q.rationale.acceptanceOutlook}, ` +
+            `anclado a ${q.rationale.anchoredTo})`);
           console.log(`  "${q.messageDraft}"`);
         }
       }

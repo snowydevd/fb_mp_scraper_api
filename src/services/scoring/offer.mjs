@@ -14,6 +14,13 @@ export const OFFER = {
   desiredMarginPct: 0.18, // what we want to be under market when we buy
   outlookBands: { high: 0.08, medium: 0.18 }, // gap from asking -> acceptance outlook
   roundTo: 50,
+  // When the car is already priced at or below our target, the median anchor
+  // lands above the asking price and clamping produced an offer EQUAL to it -
+  // a draft reading "te pago 5990" for a car listed at 5990. That is not an
+  // offer, it is a no-op, and it was reaching the contact queue. A cash,
+  // same-day, self-collected purchase is worth at least this much of a
+  // discount, so the offer floor sits below asking rather than on it.
+  minCashDiscountPct: 0.03,
 };
 
 const round = (v, step) => Math.round(v / step) * step;
@@ -41,7 +48,16 @@ export function suggestOffer(listing, reference) {
   const raw = Math.min(anchor, asking);
   // Round to a clean figure, then re-clamp: rounding 5 990 up to 6 000 would
   // have us offering more than the seller is asking.
-  const offer = Math.min(round(raw, OFFER.roundTo), asking);
+  let offer = Math.min(round(raw, OFFER.roundTo), asking);
+  let anchoredTo = "market_median";
+
+  // The car is already at or below what the median says we should pay, so the
+  // clamp collapsed the offer onto the asking price. Fall back to the cash
+  // discount rather than emit a draft that offers exactly what is being asked.
+  if (offer >= asking) {
+    offer = Math.min(round(asking * (1 - OFFER.minCashDiscountPct), OFFER.roundTo), asking - 1);
+    anchoredTo = "asking_cash_discount";
+  }
   const gapFromAsking = (asking - offer) / asking;
   const underMarket = (reference.median - offer) / reference.median;
 
@@ -59,7 +75,7 @@ export function suggestOffer(listing, reference) {
     gapFromAskingPct: Number((gapFromAsking * 100).toFixed(1)),
     underMarketPct: Number((underMarket * 100).toFixed(1)),
     acceptanceOutlook: outlook,
-    anchoredTo: "market_median",
+    anchoredTo,
     referenceSampleSize: reference.sampleSize,
     referenceSource: reference.source ?? null,
   };
@@ -92,10 +108,19 @@ export function draftMessage(listing, offerResult) {
     lines.push(`Vi que ajustaste el precio más de una vez, así que te tiro una propuesta concreta.`);
   }
 
-  lines.push(
-    `Estoy en condiciones de pagarte ${cur} ${amount} al contado, hoy mismo, y lo retiro yo.`,
-    `Si te sirve, coordinamos para verlo cuando puedas. Gracias.`
-  );
+  if (offerResult.anchoredTo === "asking_cash_discount") {
+    // The price is already fair. Pretending otherwise reads as a lowball and
+    // loses the car; the honest pitch here is speed and certainty, not price.
+    lines.push(
+      `El precio me parece razonable. Te ofrezco ${cur} ${amount} al contado, hoy mismo, y lo retiro yo.`,
+      `Si te sirve, coordinamos para verlo cuando puedas. Gracias.`
+    );
+  } else {
+    lines.push(
+      `Estoy en condiciones de pagarte ${cur} ${amount} al contado, hoy mismo, y lo retiro yo.`,
+      `Si te sirve, coordinamos para verlo cuando puedas. Gracias.`
+    );
+  }
 
   return lines.join(" ");
 }

@@ -7,6 +7,7 @@
  * are comparable, and each carries the raw input it was derived from.
  */
 import { evaluateFlags } from "./flags.mjs";
+import { detectDealer, DEALER_HIGH_CONFIDENCE } from "./dealer.mjs";
 
 const clamp = (v, lo = -1, hi = 1) => Math.max(lo, Math.min(hi, v));
 
@@ -107,6 +108,37 @@ export function sellerScore(activeCount) {
   return { value: 0.1, applicable: true, activeCount: n, reason: "single listing" };
 }
 
+/**
+ * Seller subscore, dealership detection included.
+ *
+ * The listing-count heuristic above is only one of three signals and the
+ * weakest in practice: it needs the database (or a batch large enough to see
+ * the same seller twice) and it misses a dealership that posts one car at a
+ * time. `detectDealer` folds it together with Facebook's structured fields and
+ * the vocabulary of the description, and the worst of the two verdicts wins.
+ */
+export function sellerSubscore(listing) {
+  const activeCount = listing.sellerActiveCount ?? listing.seller_active_count ?? null;
+  const byCount = sellerScore(activeCount);
+  const verdict = detectDealer({
+    title: listing.title,
+    description: listing.description,
+    sellerType: listing.sellerType ?? listing.seller_type,
+    dealershipName: listing.dealershipName ?? listing.dealership_name,
+    sellerActiveCount: activeCount,
+  });
+  if (verdict.isDealer) {
+    return {
+      value: -1,
+      applicable: true,
+      activeCount: activeCount ?? undefined,
+      reason: "likely dealer",
+      dealer: verdict,
+    };
+  }
+  return { ...byCount, dealer: verdict };
+}
+
 // --- composition ----------------------------------------------------------
 
 /**
@@ -176,15 +208,30 @@ export function scoreV2(listing, reference) {
       vehicleYear: listing.vehicleYear ?? listing.vehicle_year,
     }),
     flags: { value: flags.score, applicable: flags.hits.length > 0, hits: flags.hits, disqualified: flags.disqualified },
-    seller: sellerScore(listing.sellerActiveCount ?? listing.seller_active_count),
+    seller: sellerSubscore(listing),
   };
   const result = compose(subscores, WEIGHTS_V2, !!ref?.isReliable, "v2");
+
+  const dealer = subscores.seller.dealer;
+  result.dealer = dealer;
+  // A confidently-identified dealership is not a low-ranked opportunity, it is
+  // not an opportunity: there is no margin to negotiate and the approach is
+  // wasted. Weighted at 0.08 the seller subscore could never push one out of
+  // the ranking on its own, so the verdict cuts outside the weighted sum.
+  if (dealer.isDealer && (dealer.confidence === "high" || dealer.score >= DEALER_HIGH_CONFIDENCE)) {
+    result.disqualified = true;
+    result.disqualifiedBy = [`automotora/revendedor (${dealer.reasons.slice(0, 3).join(", ")})`];
+    result.score = -1;
+  }
   if (flags.disqualified) {
     // A financed listing advertises its down payment, so its price carries no
     // information about the car. Force it out of the ranking rather than let a
     // strong price subscore drag it back up.
     result.disqualified = true;
-    result.disqualifiedBy = flags.hits.filter((h) => h.disqualifies).map((h) => h.label);
+    result.disqualifiedBy = [
+      ...(result.disqualifiedBy ?? []),
+      ...flags.hits.filter((h) => h.disqualifies).map((h) => h.label),
+    ];
     result.score = -1;
   }
   return result;

@@ -7,7 +7,7 @@ import { config } from "../config.mjs";
 
 const router = Router();
 
-router.get("/", async (req, res) => {
+router.get("/", async (req, res, next) => {
   if (!config.db.url) {
     return res.status(503).json({
       error: { code: "NO_DATABASE", message: "DATABASE_URL is not configured; run the worker with --dry to see a ranking without persistence" },
@@ -18,13 +18,15 @@ router.get("/", async (req, res) => {
   if (minScore != null && !Number.isFinite(minScore)) {
     return res.status(400).json({ error: { code: "BAD_REQUEST", message: "minScore must be a number" } });
   }
+  // Dealerships are filtered out by default; ?includeDealers=1 is for auditing
+  // the filter, not for browsing.
+  const includeDealers = req.query.includeDealers === "1" || req.query.includeDealers === "true";
   try {
     const { rankedOpportunities } = await import("../db/repo.mjs");
-    const rows = await rankedOpportunities({ limit, minScore });
+    const rows = await rankedOpportunities({ limit, minScore, includeDealers });
     res.json({ count: rows.length, items: rows });
   } catch (err) {
-    console.error("[api] opportunities failed:", err);
-    res.status(500).json({ error: { code: "INTERNAL", message: err.message } });
+    next(err);
   }
 });
 

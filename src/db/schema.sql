@@ -36,8 +36,31 @@ CREATE TABLE IF NOT EXISTS listings (
   vehicle_year        INTEGER,
   make                TEXT,
   model               TEXT,
+  trim                TEXT,
+  title_status        TEXT,
+  is_paid_off         BOOLEAN,
+  number_of_owners    INTEGER,
+  transmission        TEXT,
+  fuel_type           TEXT,
+  seller_type         TEXT,                          -- Facebook's vehicle_seller_type
+  is_dealer           BOOLEAN,                       -- our combined verdict
+  dealer_score        NUMERIC(6,3),
+  dealer_reasons      JSONB,                         -- why the verdict went that way
   detail_fetched_at   TIMESTAMPTZ
 );
+
+-- Columns added after the first deployment. CREATE TABLE IF NOT EXISTS above is
+-- a no-op on an existing database, so every later column needs its own ALTER.
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS trim             TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS title_status     TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS is_paid_off      BOOLEAN;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS number_of_owners INTEGER;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS transmission     TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS fuel_type        TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_type      TEXT;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS is_dealer        BOOLEAN;
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS dealer_score     NUMERIC(6,3);
+ALTER TABLE listings ADD COLUMN IF NOT EXISTS dealer_reasons   JSONB;
 
 CREATE INDEX IF NOT EXISTS listings_active_idx    ON listings (is_active, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS listings_seller_idx    ON listings (seller_id) WHERE seller_id IS NOT NULL;
@@ -113,5 +136,15 @@ CREATE TABLE IF NOT EXISTS contact_queue (
   message_draft  TEXT NOT NULL,
   status         TEXT NOT NULL DEFAULT 'pending',    -- pending | approved | discarded | sent
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (listing_id)
 );
+ALTER TABLE contact_queue ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS contact_queue_status_idx ON contact_queue (status, created_at DESC);
+
+-- A human decides what gets sent; the worker must never overwrite that
+-- decision on its next run. Only rows still untouched at 'pending' may be
+-- refreshed, and this constraint keeps the vocabulary honest.
+ALTER TABLE contact_queue DROP CONSTRAINT IF EXISTS contact_queue_status_check;
+ALTER TABLE contact_queue ADD CONSTRAINT contact_queue_status_check
+  CHECK (status IN ('pending', 'approved', 'discarded', 'sent'));
