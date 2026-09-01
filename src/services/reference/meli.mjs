@@ -22,6 +22,44 @@ export class MeliUnavailableError extends Error {
   }
 }
 
+/**
+ * Todo lo que sale a MercadoLibre pasa por acá.
+ *
+ * Un corte de red da `TypeError: fetch failed`, que NO es MeliUnavailableError,
+ * así que se propagaba hasta arriba y volteaba la corrida entera del worker —
+ * después de haber gastado las navegaciones a Facebook, que son el recurso
+ * caro. MercadoLibre es una fuente auxiliar: que se caiga tiene que degradar a
+ * la referencia interna, nunca tirar abajo el scrapeo.
+ *
+ * Y reintenta, porque el modo de falla observado fue un timeout de conexión
+ * aislado contra un host que respondía normal antes y después.
+ */
+export const MELI_RETRIES = 2;
+export const MELI_TIMEOUT_MS = 20_000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export async function meliFetch(url, { headers = {}, method = "GET", body, retries = MELI_RETRIES } = {}) {
+  let ultimo = null;
+  for (let intento = 0; intento <= retries; intento++) {
+    if (intento > 0) await sleep(400 * 2 ** (intento - 1));
+    try {
+      return await fetch(url, {
+        method, body,
+        headers: { accept: "application/json", ...headers },
+        signal: AbortSignal.timeout(MELI_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // Red, DNS, TLS o timeout: transitorio, se reintenta y si igual falla
+      // sale como MeliUnavailableError para que el llamador degrade.
+      ultimo = err;
+    }
+  }
+  throw new MeliUnavailableError(
+    `no se pudo llegar a MercadoLibre tras ${retries + 1} intentos: ${ultimo?.cause?.code ?? ultimo?.message ?? ultimo}`
+  );
+}
+
 let cachedToken = null; // { value, expiresAt }
 
 async function getToken() {
@@ -33,9 +71,9 @@ async function getToken() {
     );
   }
 
-  const res = await fetch(`${API}/oauth/token`, {
+  const res = await meliFetch(`${API}/oauth/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "client_credentials",
       client_id: config.meli.clientId,
@@ -53,9 +91,9 @@ async function getToken() {
 /** El token crudo, con sus metadatos. Sólo para diagnóstico. */
 export async function debugToken() {
   if (config.meli.accessToken) return { source: "MELI_ACCESS_TOKEN", token: config.meli.accessToken, raw: null };
-  const res = await fetch(`${API}/oauth/token`, {
+  const res = await meliFetch(`${API}/oauth/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "client_credentials",
       client_id: config.meli.clientId ?? "",
@@ -69,7 +107,7 @@ export async function debugToken() {
 
 /** True when the configured category id resolves - callable without a token. */
 export async function verifyCategory(categoryId = config.meli.carsCategory) {
-  const res = await fetch(`${API}/categories/${categoryId}`, { headers: { accept: "application/json" } });
+  const res = await meliFetch(`${API}/categories/${categoryId}`);
   if (!res.ok) return { ok: false, status: res.status };
   const json = await res.json();
   return { ok: true, id: json.id, name: json.name };
@@ -78,8 +116,8 @@ export async function verifyCategory(categoryId = config.meli.carsCategory) {
 /** ¿Están las credenciales y funcionan? Para `npm run meli:check`. */
 export async function checkCredentials() {
   const token = await getToken();          // tira MeliUnavailableError si falta
-  const res = await fetch(`${API}/sites/${config.meli.siteId}/search?category=${config.meli.carsCategory}&limit=1`, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+  const res = await meliFetch(`${API}/sites/${config.meli.siteId}/search?category=${config.meli.carsCategory}&limit=1`, {
+    headers: { authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
     throw new MeliUnavailableError(`la búsqueda respondió HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -168,7 +206,7 @@ export async function searchVehicles({
   if (sort) params.set("sort", sort);
 
   const url = `${API}/sites/${config.meli.siteId}/search?${params}`;
-  const res = await fetch(url, { headers: { authorization: `Bearer ${token}`, accept: "application/json" } });
+  const res = await meliFetch(url, { headers: { authorization: `Bearer ${token}` } });
   if (!res.ok) {
     // El cuerpo del 403 nombra la política que bloqueó (PA_UNAUTHORIZED_...),
     // que es lo único accionable. Sin él, "HTTP 403" no dice si falta un scope,
@@ -203,8 +241,8 @@ export async function searchComparables({ make, model, yearFrom, yearTo, limit =
   });
   if (yearFrom && yearTo) params.set("ITEM_CONDITION", "2230581"); // usados
 
-  const res = await fetch(`${API}/sites/${config.meli.siteId}/search?${params}`, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+  const res = await meliFetch(`${API}/sites/${config.meli.siteId}/search?${params}`, {
+    headers: { authorization: `Bearer ${token}` },
   });
   if (res.status === 401 || res.status === 403) {
     throw new MeliUnavailableError(`MercadoLibre rejected the token: HTTP ${res.status}`);

@@ -11,18 +11,22 @@
  * pegarlo en un mensaje.
  */
 import { config } from "../src/config.mjs";
-import { debugToken } from "../src/services/reference/meli.mjs";
+import { debugToken, meliFetch, MeliUnavailableError } from "../src/services/reference/meli.mjs";
 
 const API = "https://api.mercadolibre.com";
 const SITE = config.meli.siteId;
 const CAT = config.meli.carsCategory;
-const { token } = await debugToken();
+let token;
+try {
+  ({ token } = await debugToken());
+} catch (err) {
+  console.error(`\nno se pudo arrancar: ${err.message}`);
+  if (err instanceof MeliUnavailableError) console.error("  (si dice UND_ERR_CONNECT_TIMEOUT, fue la red: reintentá)\n");
+  process.exit(1);
+}
 
 const get = async (url) => {
-  const res = await fetch(url, {
-    headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-    signal: AbortSignal.timeout(25_000),
-  });
+  const res = await meliFetch(url, { headers: { authorization: `Bearer ${token}` } });
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* no era json */ }

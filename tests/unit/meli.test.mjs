@@ -114,3 +114,64 @@ test("sin comparables no explota", () => {
   assert.match(x.reason, /sin comparables/);
   assert.deepEqual(crossReference(gol2012, null).comparables, []);
 });
+
+// --- resiliencia de red ---------------------------------------------------
+// Un corte de red da `TypeError: fetch failed`, que NO es MeliUnavailableError:
+// se propagaba hasta arriba y volteaba la corrida entera del worker, después de
+// haber gastado las navegaciones a Facebook, que son el recurso caro.
+test("un fallo de red sale como MeliUnavailableError, no como TypeError", async () => {
+  const { meliFetch, MeliUnavailableError, MELI_RETRIES } = await import("../../src/services/reference/meli.mjs");
+  const original = globalThis.fetch;
+  let intentos = 0;
+  globalThis.fetch = async () => {
+    intentos++;
+    throw Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_CONNECT_TIMEOUT" } });
+  };
+  try {
+    await assert.rejects(
+      () => meliFetch("https://api.mercadolibre.com/categories/MLU1744", { retries: 1 }),
+      (err) => {
+        assert.ok(err instanceof MeliUnavailableError, `salió ${err.constructor.name}, el worker no lo atrapa`);
+        assert.match(err.message, /UND_ERR_CONNECT_TIMEOUT/, "el motivo real tiene que sobrevivir");
+        return true;
+      }
+    );
+    assert.equal(intentos, 2, "reintenta antes de rendirse: el fallo observado fue un timeout aislado");
+    assert.ok(MELI_RETRIES >= 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("un reintento que funciona no molesta a nadie", async () => {
+  const { meliFetch } = await import("../../src/services/reference/meli.mjs");
+  const original = globalThis.fetch;
+  let intentos = 0;
+  globalThis.fetch = async () => {
+    if (++intentos === 1) throw new TypeError("fetch failed");
+    return new Response('{"ok":true}', { status: 200 });
+  };
+  try {
+    const res = await meliFetch("https://api.mercadolibre.com/x");
+    assert.equal(res.status, 200);
+    assert.equal(intentos, 2);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+// Un 4xx/5xx NO es un fallo de red: la respuesta vuelve y la decide el llamador,
+// que es quien puede leer el cuerpo y decir qué política bloqueó.
+test("un 403 vuelve como respuesta, no como excepción de red", async () => {
+  const { meliFetch } = await import("../../src/services/reference/meli.mjs");
+  const original = globalThis.fetch;
+  let intentos = 0;
+  globalThis.fetch = async () => { intentos++; return new Response('{"error":"forbidden"}', { status: 403 }); };
+  try {
+    const res = await meliFetch("https://api.mercadolibre.com/x");
+    assert.equal(res.status, 403);
+    assert.equal(intentos, 1, "reintentar un 403 es gastar llamadas: no va a cambiar");
+  } finally {
+    globalThis.fetch = original;
+  }
+});

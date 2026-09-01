@@ -11,7 +11,7 @@
  * No imprime el token: sólo su prefijo, para poder identificarlo sin filtrarlo.
  */
 import { config } from "../src/config.mjs";
-import { debugToken, MeliUnavailableError } from "../src/services/reference/meli.mjs";
+import { debugToken, meliFetch, MeliUnavailableError } from "../src/services/reference/meli.mjs";
 
 const API = "https://api.mercadolibre.com";
 const SITE = config.meli.siteId;
@@ -51,7 +51,7 @@ for (const [nombre, url, conToken] of pruebas) {
   if (conToken) headers.authorization = `Bearer ${token}`;
   let res, body;
   try {
-    res = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
+    res = await meliFetch(url, { headers });
     body = await res.text();
   } catch (err) {
     console.log(`  ??? ${nombre.padEnd(38)} error de red: ${err.message}`);
