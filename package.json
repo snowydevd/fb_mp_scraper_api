@@ -17,7 +17,8 @@
     "db:down": "docker rm -f fbmp-pg",
     "meli:check": "node scripts/meli-check.mjs",
     "compare": "node scripts/compare-sources.mjs",
-    "meli:diagnose": "node scripts/meli-diagnose.mjs"
+    "meli:diagnose": "node scripts/meli-diagnose.mjs",
+    "meli:explore": "node scripts/meli-explore.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
