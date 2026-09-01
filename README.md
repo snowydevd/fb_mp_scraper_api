@@ -485,6 +485,65 @@ Cuando la referencia de mercado tiene menos de 5 comparables, el peso del
 subscore de precio se recorta al 25% y se redistribuye, para que una referencia
 pobre no decida el ranking.
 
+### MercadoLibre: credenciales y cruce
+
+`GET /sites/MLU/search` **no es público**. Verificado hoy contra la API:
+
+```
+GET /categories/MLU1744  -> 200  "Autos y Camionetas", 22.773 publicaciones
+GET /sites/MLU/search    -> 403  forbidden
+GET /sites/MLU           -> 403  PA_UNAUTHORIZED_RESULT_FROM_POLICIES
+```
+
+El grant `client_credentials` **sigue vigente**: con credenciales falsas el
+endpoint de token responde `invalid client_id or client_secret`, no
+`unsupported_grant_type`. O sea que alcanza con una app; no hace falta el flujo
+de autorización de usuario.
+
+**Cómo obtenerlas:**
+
+1. https://developers.mercadolibre.com.uy/devcenter — con tu cuenta de MercadoLibre
+2. Crear una aplicación. Te da **App ID** (`client_id`) y **Secret Key** (`client_secret`)
+3. Al `.env`:
+   ```
+   MELI_CLIENT_ID=<App ID>
+   MELI_CLIENT_SECRET=<Secret Key>
+   ```
+4. `npm run meli:check`
+
+Docs de autenticación:
+https://developers.mercadolibre.com.uy/es_ar/autenticacion-y-autorizacion
+
+**`npm run meli:check`** verifica la categoría, el token y una búsqueda real con
+los filtros del pipeline. Existe porque el resto degrada en silencio cuando MELI
+no está —cae a la referencia interna y sigue, que es lo correcto en una corrida
+pero pésimo cuando querés saber si quedó bien configurado.
+
+**`npm run compare`** hace la MISMA búsqueda con los MISMOS filtros en las dos
+fuentes y compara las medianas. Sirve para calibrar: si las dos dan medianas
+parecidas, la referencia interna no estaba tan mal.
+
+**El cruce por aviso** (`cross-reference.mjs`) es distinto de la mediana: además
+del número trae **cuáles** son los comparables, con su link, para poder abrirlos
+y ver si la comparación tiene sentido. Un ranking que dice "18% bajo mercado"
+sin poder mostrar contra qué no se puede auditar. Y trae la pregunta práctica:
+`cheaperOnMeli`, cuántos comparables están **más baratos** en MercadoLibre — si
+hay seis, el chollo de Facebook no lo es.
+
+Dos números que no hay que confundir: `matched` son los comparables encontrados
+(ya pasaron marca, modelo, año y moneda) y decide la confiabilidad; `sampleSize`
+son los que sobreviven al recorte p10–p90 que protege a la mediana de las
+publicaciones fantasma. Juzgar la confiabilidad sobre el recorte hacía falta ~8
+comparables para que alguna vez dijera que sí.
+
+Como en todo el resto, **nunca se convierte moneda**: un comparable en UYU no
+compara contra un aviso en USD, se descarta y se informa cuántos.
+
+> El mapeo y el cruce están cubiertos por tests contra fixtures. El round-trip
+> HTTP de la búsqueda **queda sin verificar** hasta que haya credenciales: la
+> forma de los parámetros y de la respuesta sale de la documentación, no de una
+> respuesta real. `npm run meli:check` es lo primero que lo va a ejercitar.
+
 ### Precio de referencia
 
 `GET /sites/MLU/search` de MercadoLibre **ya no es público** (403

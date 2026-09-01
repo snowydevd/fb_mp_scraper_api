@@ -13,7 +13,8 @@ import { fetchListingDetail } from "../services/marketplace/detail.mjs";
 import { closeBrowser, listingsUsed, log, BudgetExceededError } from "../services/marketplace/browser.mjs";
 import { referenceFromInternal, referenceFromMeli } from "../services/reference/reference-price.mjs";
 import { createReferenceCache } from "../services/reference/cache.mjs";
-import { MeliUnavailableError } from "../services/reference/meli.mjs";
+import { MeliUnavailableError, searchVehicles as searchMeliVehicles } from "../services/reference/meli.mjs";
+import { crossReference, YEAR_TOLERANCE } from "../services/reference/cross-reference.mjs";
 import { scoreV1, scoreV2 } from "../services/scoring/scorer.mjs";
 import { detectDealer, countBySellerInBatch } from "../services/scoring/dealer.mjs";
 import { partitionVehicles } from "../services/marketplace/vehicle-filter.mjs";
@@ -110,6 +111,40 @@ async function referenceFor(listing, batch, { cache, dealerIds }) {
   return ref;
 }
 
+/**
+ * Cruce contra MercadoLibre para un aviso puntual.
+ *
+ * Memoizado por marca/modelo/banda de años dentro de la corrida: varios avisos
+ * del mismo Gol 2012 comparten una sola llamada. Y si MELI no está disponible,
+ * esto NO puede voltear la corrida: el cruce es información extra sobre un
+ * borrador, no un requisito para producirlo.
+ */
+async function crossReferenceAgainstMeli(listing, memo, cache) {
+  const make = listing.make ?? null;
+  const model = listing.model ?? null;
+  if (!make || !model) return null;
+  if (cache.upstreamUnavailable) return null;
+
+  const year = listing.vehicleYear ?? null;
+  const key = [make, model, year ?? "?"].join("|").toLowerCase();
+  if (!memo.has(key)) {
+    try {
+      const { items } = await searchMeliVehicles({
+        make, model,
+        minYear: year ? year - YEAR_TOLERANCE : undefined,
+        maxYear: year ? year + YEAR_TOLERANCE : undefined,
+        limit: 50,
+      });
+      memo.set(key, items);
+    } catch (err) {
+      if (!(err instanceof MeliUnavailableError)) throw err;
+      cache.markUpstreamUnavailable(err.message);
+      return null;
+    }
+  }
+  return crossReference(listing, memo.get(key));
+}
+
 export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}) {
   const runId = randomUUID();
   const started = Date.now();
@@ -148,6 +183,7 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
   }
 
   const cache = createReferenceCache({ repo, log });
+  const meliMemo = new Map();
   const counts = await sellerCounts(items, repo);
 
   // --- grid-level dealer pass -------------------------------------------
@@ -268,7 +304,18 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
         rejected.push({ id: merged.id, title: merged.title, reason: `automotora (${dealer.confidence}): ${dealer.reasons.join(", ")}` });
         log("info", `skipping contact draft for ${merged.id}: dealer verdict ${dealer.confidence} (${dealer.reasons.join(", ")})`);
       } else {
+        // Cruce contra MercadoLibre: qué vale el mismo auto en el mercado
+        // formal, y cuántos hay más baratos allá. Si hay seis más baratos en
+        // MercadoLibre, el "chollo" de Facebook no lo es.
+        const cruce = await crossReferenceAgainstMeli(merged, meliMemo, cache);
+        if (cruce?.reliable) {
+          log("info", `${merged.id}: ${cruce.verdict} (${cruce.deltaPct}% vs mediana ${Math.round(cruce.median)} ${cruce.currency}, ` +
+            `${cruce.matched} comparables, ${cruce.cheaperOnMeli} más baratos allá)`);
+        }
+        cand.crossReference = cruce;
+
         const entry = buildContactEntry({ ...merged, priceChangeCount: cand.listing.priceChangeCount }, reference);
+        if (entry.ok && cruce) entry.rationale.meliCrossReference = cruce;
         const debt = entry.rationale?.debt;
         if (debt?.deducted > 0) {
           log("info", `${merged.id}: deuda declarada de ${debt.currency} ${debt.deducted} descontada de la oferta`);
@@ -355,6 +402,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           if (d?.needsReview?.length) {
             console.log(`  ** REVISAR A MANO: deuda declarada sin descontar -> ` +
               d.needsReview.map((x) => `${x.amount} (${x.reason})`).join("; ") + " **");
+          }
+          const cr = q.rationale.meliCrossReference;
+          if (cr?.reliable) {
+            console.log(`  MercadoLibre: ${cr.verdict} — ${cr.deltaPct}% vs mediana ${Math.round(cr.median)} ${cr.currency} ` +
+              `(${cr.matched} comparables, ${cr.cheaperOnMeli} más baratos allá)`);
+            for (const c of cr.comparables.slice(0, 3)) {
+              console.log(`      ${String(c.price).padStart(6)} ${c.currency} ${c.vehicleYear ?? ""} ${c.url}`);
+            }
+          } else if (cr) {
+            console.log(`  MercadoLibre: sin cruce confiable (${cr.reason})`);
           }
           console.log(`  "${q.messageDraft}"`);
         }
