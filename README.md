@@ -318,6 +318,50 @@ tildes, en minúsculas, con los emoji convertidos en separador. Escritos contra
 el texto crudo, los patrones fallaban en silencio — `/\bfinanciad[oa]\b/` nunca
 matcheaba "Financiación" y `/\bpermuto\b/` nunca matcheaba "Permuta".
 
+### Deuda, prenda y embargo
+
+Los términos de gravamen se pesan por separado, porque no son lo mismo: una
+**prenda** viva bloquea la transferencia hasta cancelarla, mientras que una
+**deuda de patente** es chica, conocida y se descuenta del precio.
+
+| Término            | Peso  |
+| ------------------ | ----- |
+| `embargo`          | -0.45 |
+| `prenda`           | -0.40 |
+| `gravamen`         | -0.40 |
+| `deuda`            | -0.35 |
+| `debe`             | -0.30 |
+| `saldo`            | -0.25 |
+| `deuda de patente` | -0.15 |
+| `multas`           | -0.15 |
+
+**El contexto anula el término.** Sin esto el sistema penalizaba al vendedor por
+decir que el auto NO debe nada: "sin deuda" daba -0.20 y "no debe nada" -0.30,
+o sea que la señal de vendedor honesto que más queremos era justo la que
+restaba. El caso más caro era **"sin embargo"**: la conjunción adversativa más
+común del español matcheaba `/\bembargo\b/` y valía -0.45, así que cualquier
+vendedor escribiendo prosa normal ("tiene detalles de pintura, sin embargo el
+motor está impecable") quedaba marcado como auto embargado.
+
+Anulan el término que viene después: `sin`, `no tiene/debe/adeuda`, `libre de`.
+Y apareciendo después: `cancelada`, `levantada`, `saldada`, `pagada`. Una prenda
+levantada es un trámite terminado, no un gravamen.
+
+La ventana de contexto es chica (28 caracteres) a propósito: con una ventana
+grande, un "sin" de cualquier parte del aviso anularía una prenda mencionada
+tres oraciones más abajo.
+
+Cada aparición se evalúa por separado, así que "sin deuda de patente, pero debe
+multas" anula la primera y cuenta la segunda. Lo anulado se devuelve en
+`neutralised` en vez de desaparecer, y un término específico que reemplaza a uno
+genérico (`deuda de patente` sobre `deuda`) deja el genérico visible con
+`counted: false` — el desglose tiene que explicar el score, y un hit con peso
+que no está sumado hace que los números no cierren para quien los lea.
+
+Del otro lado suman: `libre de deuda`, `sin deuda`, `no debe nada`,
+`sin prenda`, `patente al día`, `prenda cancelada`, `único dueño`,
+`papeles al día`.
+
 ### La trampa de los financiados
 
 Los avisos financiados publican **la entrega, no el precio del auto**. Un Ford
