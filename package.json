@@ -16,7 +16,8 @@
     "db:up": "docker run -d --name fbmp-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=fbmp -p 55432:5432 postgres:16-alpine",
     "db:down": "docker rm -f fbmp-pg",
     "meli:check": "node scripts/meli-check.mjs",
-    "compare": "node scripts/compare-sources.mjs"
+    "compare": "node scripts/compare-sources.mjs",
+    "meli:diagnose": "node scripts/meli-diagnose.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
