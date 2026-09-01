@@ -16,11 +16,18 @@ import { createReferenceCache } from "../services/reference/cache.mjs";
 import { MeliUnavailableError } from "../services/reference/meli.mjs";
 import { scoreV1, scoreV2 } from "../services/scoring/scorer.mjs";
 import { detectDealer, countBySellerInBatch } from "../services/scoring/dealer.mjs";
+import { partitionVehicles } from "../services/marketplace/vehicle-filter.mjs";
 import { buildContactEntry } from "../services/scoring/offer.mjs";
 
 /** Listings scoring at or above this get their detail page fetched (Fase 5). */
 export const DETAIL_THRESHOLD = Number(process.env.DETAIL_SCORE_THRESHOLD ?? 0.25);
 export const DETAIL_MAX_PER_RUN = Number(process.env.DETAIL_MAX_PER_RUN ?? 5);
+
+/**
+ * Fracción de la tanda que puede saltearse por veredicto de GRILLA antes de que
+ * dejemos de creerle. Ver el comentario en el filtro de elegibles.
+ */
+export const GRID_DEALER_SKIP_MAX_SHARE = Number(process.env.GRID_DEALER_SKIP_MAX_SHARE ?? 0.5);
 
 export const DEFAULT_FILTERS = {
   location: "montevideo",
@@ -108,15 +115,33 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
   const started = Date.now();
   log("info", `sync ${runId} start dry=${dryRun}`, filters);
 
-  const { url, items, failures } = await searchVehicles(filters, { skipDelay: dryRun });
+  const { url, items: raw, failures } = await searchVehicles(filters, { skipDelay: dryRun });
   if (failures.length) log("error", `${failures.length} listings failed to map`, failures.slice(0, 3));
+
+  // La categoría la elige el vendedor, y publicar una cubierta dentro de "Autos
+  // y camionetas" da mucha más visibilidad que ponerla en repuestos. Llegaron a
+  // la cola títulos como "Cubierta rodado 17" con un borrador ofreciendo miles
+  // de dólares.
+  //
+  // El corte va acá, antes de persistir, porque un repuesto no sólo ensucia la
+  // cola: entra a `listings`, se puntúa, y sobre todo entra en la mediana
+  // interna de precios, donde una cubierta "de USD 850" arrastra para abajo la
+  // referencia que decide todo el ranking.
+  const { vehicles: items, notVehicles } = partitionVehicles(raw);
+  if (notVehicles.length) {
+    log("info", `${notVehicles.length}/${raw.length} descartados por no ser vehículos`,
+      notVehicles.map((n) => `${n.title} (${n.matched})`).slice(0, 8));
+  }
 
   let repo = null;
   if (!dryRun) {
     if (!config.db.url) throw new Error("DATABASE_URL is not set - run with --dry or configure a database");
     repo = await import("../db/repo.mjs");
     await repo.migrate();
-    await repo.saveSnapshot({ runId, sourceUrl: url, filters, payload: items, itemCount: items.length });
+    // El snapshot guarda la tanda COMPLETA, incluido lo descartado: existe para
+    // poder reparsear sin volver a scrapear, y si guardáramos sólo lo que pasó
+    // el filtro de hoy nunca podríamos revisar si el filtro se comió algo.
+    await repo.saveSnapshot({ runId, sourceUrl: url, filters, payload: raw, itemCount: raw.length });
     const stats = await repo.upsertListings(items);
     const deactivated = await repo.markMissingInactive(items.map((i) => i.id), { city: null });
     log("info", `persisted: +${stats.inserted} new, ${stats.updated} updated, ${stats.priceChanges} price changes, ${deactivated} deactivated`);
@@ -163,9 +188,28 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
   // navigations went to listings that were then thrown away, so no genuine
   // candidate got looked at at all. Suspicion below the threshold does NOT
   // skip - a demoted score is the right response to a maybe.
+  //
+  // Con un tope. En una corrida se vio `gridDealers: 22` de 24 —un transitorio
+  // que no se pudo reproducir después, dos corridas siguientes dieron 4— y con
+  // ese número el salteo habría descartado la tanda entera sin abrir una sola
+  // publicación, en silencio y sin nada raro en el resumen.
+  //
+  // Que la grilla diga que casi todo es automotora es mucho más probable que
+  // sea un problema de detección que un hecho del mercado: el veredicto de
+  // grilla necesita una señal decisiva o 0.6 sólo con el título, y los títulos
+  // rara vez llegan. Pasado el tope se desconfía del veredicto y se abre el
+  // detalle igual — la degradación del score sigue aplicando, y v2 decide con
+  // la descripción a la vista, que es donde la decisión es firme.
   const rejected = [];
+  const gridDealerShare = scored.length ? dealerIds.size / scored.length : 0;
+  const trustGridSkip = gridDealerShare <= GRID_DEALER_SKIP_MAX_SHARE;
+  if (!trustGridSkip) {
+    log("error",
+      `la grilla marcó ${dealerIds.size}/${scored.length} como automotoras (${Math.round(gridDealerShare * 100)}%), ` +
+      `por encima del ${Math.round(GRID_DEALER_SKIP_MAX_SHARE * 100)}% esperable: se desconfía del veredicto y se abre el detalle igual`);
+  }
   const eligible = scored.filter((s) => {
-    if (!s.dealer?.isDealer) return true;
+    if (!trustGridSkip || !s.dealer?.isDealer) return true;
     rejected.push({
       id: s.listing.id,
       title: s.listing.title,
@@ -259,9 +303,11 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
     runId,
     url,
     found: items.length,
+    notVehicles: notVehicles.length,
     scored: scored.length,
     gridDealers: dealerIds.size,
     detailSkippedAsDealer: scored.length - eligible.length,
+    gridDealerSkipTrusted: trustGridSkip,
     detailFetched: candidates.length,
     queued: queue.length,
     rejected: rejected.length,
@@ -287,6 +333,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           `${v.score.toFixed(3)} [${v.version}] ${String(s.listing.price).padStart(6)} ${s.listing.currencyResolved} ` +
           `| ${(s.listing.title ?? "").slice(0, 38).padEnd(40)} ${km}${flag}`
         );
+      }
+      if (summary.notVehicles) {
+        console.log(`\n=== NO SON VEHÍCULOS (${summary.notVehicles} descartados antes de puntuar) ===`);
       }
       if (rejected.length) {
         console.log("\n=== DESCARTADOS (no llegan a la cola) ===");

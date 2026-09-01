@@ -277,6 +277,41 @@ Por eso se guardan **tres** campos y ninguno se convierte al escribir:
 | `currency_resolved`   | Nuestra lectura, por magnitud del monto         |
 | `currency_confidence` | `high` / `low` / `none`                         |
 
+### Repuestos publicados como si fueran autos
+
+La categoría la elige el **vendedor**, y publicar una cubierta dentro de "Autos
+y camionetas" da mucha más visibilidad que ponerla en repuestos. Así llegaron a
+la cola de contacto títulos como "Cubierta rodado 17" y "Tapa de válvulas", con
+un borrador ofreciendo miles de dólares por una pieza.
+
+Filtrar por `marketplace_listing_category_id` **no alcanza** justamente por eso:
+esas publicaciones traen la categoría de autos, porque es ahí donde el vendedor
+las puso. Igual se chequea, porque es gratis y ataja el otro caso (la categoría
+`vehicles`, que sí incluye repuestos de verdad).
+
+El riesgo caro acá es el **falso positivo**: descartar un auto real no se nota
+en ningún log, simplemente nunca aparece. Por eso `vehicle-filter.mjs`:
+
+- mira **sólo el título**, nunca la descripción — la descripción de un auto real
+  habla de piezas todo el tiempo ("motor impecable", "cubiertas nuevas",
+  "tapizado original");
+- usa dos niveles de término. El **fuerte** (`cubierta`, `tapa de válvulas`,
+  `alternador`, `paragolpes`, `amortiguador`…) alcanza solo, incluso si el
+  título nombra una marca: "Tapa de válvulas Volkswagen Gol" sigue siendo una
+  tapa de válvulas. El **débil** (`motor`, `caja`, `puerta`, `asiento`) sólo
+  cuenta si la pieza es el **sujeto** del título — "Motor Fiat Uno 1.4" es un
+  motor, "Fiat Uno 1.4 motor impecable" es un auto.
+
+El corte va **antes de persistir**, porque un repuesto no sólo ensucia la cola:
+entra a `listings`, se puntúa, y sobre todo entra en la mediana interna de
+precios, donde una cubierta "de USD 850" arrastra para abajo la referencia que
+decide todo el ranking. El snapshot crudo sí guarda la tanda completa: existe
+para poder reparsear sin re-scrapear, y guardando sólo lo que pasó el filtro de
+hoy nunca podríamos revisar si el filtro se comió algo.
+
+Los 24 títulos de una corrida real están como fixture en los tests: ninguno
+puede caer en el filtro.
+
 ### Automotoras: el filtro principal
 
 El negocio es comprarle a un particular con motivo para vender. Una automotora
