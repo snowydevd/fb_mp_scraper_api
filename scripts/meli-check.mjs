@@ -34,8 +34,12 @@ try {
     bad(err.message);
     console.log(`
   Para arreglarlo:
-    1. Entrá a https://developers.mercadolibre.com.uy/devcenter con tu cuenta de MercadoLibre
-    2. Creá una aplicación (te da App ID y Secret Key)
+    1. Entrá a https://developers.mercadolibre.com.uy/devcenter/create-app
+       (con tu cuenta de MercadoLibre; /devcenter a secas es una landing, no el formulario)
+       Tus apps ya creadas: https://developers.mercadolibre.com.uy/devcenter/home
+    2. Completá el formulario -> te da App ID y Secret Key.
+       El "URI de redirect" es obligatorio en el formulario pero NO se usa acá:
+       el pipeline pide el token por client_credentials, sin paso por browser.
     3. Poné en el .env:
          MELI_CLIENT_ID=<App ID>
          MELI_CLIENT_SECRET=<Secret Key>

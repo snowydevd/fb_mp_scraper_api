@@ -495,15 +495,28 @@ GET /sites/MLU/search    -> 403  forbidden
 GET /sites/MLU           -> 403  PA_UNAUTHORIZED_RESULT_FROM_POLICIES
 ```
 
-El grant `client_credentials` **sigue vigente**: con credenciales falsas el
-endpoint de token responde `invalid client_id or client_secret`, no
-`unsupported_grant_type`. O sea que alcanza con una app; no hace falta el flujo
-de autorización de usuario.
+El grant `client_credentials` **sigue vigente, aunque la documentación ya no lo
+mencione** — los docs de autenticación sólo describen `authorization_code`. Se
+verificó que MELI valida el grant ANTES que las credenciales, así que el error
+distingue los dos casos:
+
+```
+grant_type=banana              -> unsupported_grant_type: invalid grant_type: banana
+grant_type=client_credentials  -> invalid_client (pasó la validación de grant)
+```
+
+O sea que alcanza con crear una app: no hace falta el flujo de autorización de
+usuario, ni un redirect URI que funcione, ni refresh tokens.
 
 **Cómo obtenerlas:**
 
-1. https://developers.mercadolibre.com.uy/devcenter — con tu cuenta de MercadoLibre
-2. Crear una aplicación. Te da **App ID** (`client_id`) y **Secret Key** (`client_secret`)
+1. **https://developers.mercadolibre.com.uy/devcenter/create-app** — con tu cuenta
+   de MercadoLibre. Ojo: `/devcenter` a secas es una landing, no el formulario;
+   las apps ya creadas están en `/devcenter/home`.
+2. Completar el formulario. Te da **App ID** (`client_id`) y **Secret Key**
+   (`client_secret`). El **URI de redirect** es obligatorio en el formulario pero
+   **no se usa acá**: el token se pide por `client_credentials`, sin paso por
+   browser, así que cualquier https válida sirve y no tiene que responder nada.
 3. Al `.env`:
    ```
    MELI_CLIENT_ID=<App ID>
