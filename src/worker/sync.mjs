@@ -132,11 +132,11 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
   // that happens after the detail fetch, with the description in hand.
   const dealerIds = new Set();
   for (const it of items) {
+    it.sellerActiveCount = it.sellerId ? counts.get(it.sellerId) ?? null : null;
     const verdict = detectDealer({
       title: it.title,
-      sellerActiveCount: it.sellerId ? counts.get(it.sellerId) ?? null : null,
+      sellerActiveCount: it.sellerActiveCount,
     });
-    it.sellerActiveCount = it.sellerId ? counts.get(it.sellerId) ?? null : null;
     it.gridDealerVerdict = verdict;
     if (verdict.isDealer) dealerIds.add(it.id);
   }
@@ -156,11 +156,28 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
   log("info", `reference cache: ${cache.stats.misses} lookups, ${cache.stats.memoHits} memo hits, ${cache.stats.dbHits} db hits, ${cache.stats.stored} stored`);
 
   // --- Fase 5: detail only for what cleared the threshold ---------------
-  const candidates = scored.filter((s) => s.score >= DETAIL_THRESHOLD).slice(0, DETAIL_MAX_PER_RUN);
-  log("info", `${candidates.length}/${scored.length} cleared the detail threshold (${DETAIL_THRESHOLD})`);
+  //
+  // A confident grid-level dealer verdict skips the detail fetch entirely.
+  // v1 already demotes these, so they rarely reach the top slice anyway, but
+  // the fetch is the scarce resource: in the run of 2026-09-01 all five
+  // navigations went to listings that were then thrown away, so no genuine
+  // candidate got looked at at all. Suspicion below the threshold does NOT
+  // skip - a demoted score is the right response to a maybe.
+  const rejected = [];
+  const eligible = scored.filter((s) => {
+    if (!s.dealer?.isDealer) return true;
+    rejected.push({
+      id: s.listing.id,
+      title: s.listing.title,
+      reason: `automotora detectada en la grilla (${s.dealer.reasons.join(", ")}) - no se abre el detalle`,
+    });
+    return false;
+  });
+  const candidates = eligible.filter((s) => s.score >= DETAIL_THRESHOLD).slice(0, DETAIL_MAX_PER_RUN);
+  log("info", `${candidates.length}/${eligible.length} cleared the detail threshold (${DETAIL_THRESHOLD}); ` +
+    `${scored.length - eligible.length} skipped as dealers before spending a navigation`);
 
   const queue = [];
-  const rejected = [];
   for (const cand of candidates) {
     try {
       const detail = await fetchListingDetail(cand.listing.id, { skipDelay: dryRun });
@@ -234,6 +251,7 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
     found: items.length,
     scored: scored.length,
     gridDealers: dealerIds.size,
+    detailSkippedAsDealer: scored.length - eligible.length,
     detailFetched: candidates.length,
     queued: queue.length,
     rejected: rejected.length,

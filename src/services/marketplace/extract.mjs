@@ -105,6 +105,8 @@ export function currencyFromLabel(label) {
   return null;
 }
 
+import { parseYear } from "./parse.mjs";
+
 function num(v) {
   if (v == null) return null;
   const n = Number(v);
@@ -164,7 +166,13 @@ export function mapListing(node) {
     state: geo?.state || null,
     categoryId: node.marketplace_listing_category_id ?? null,
     sellerId: node.marketplace_listing_seller?.id ?? null,
+
+    // Mileage and year are cheap guesses off the grid - the subtitle and the
+    // title. They are not as good as the detail page's structured fields, but
+    // they are what decides WHICH listings are worth opening at all, and
+    // opening one costs a rate-limited navigation.
     mileageHint: parseMileageHint(node.custom_sub_titles_with_rendering_flags),
+    vehicleYearHint: parseYear(node.marketplace_listing_title ?? node.custom_title, null),
 
     isSold: node.is_sold ?? null,
     isLive: node.is_live ?? null,

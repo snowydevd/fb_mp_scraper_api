@@ -90,7 +90,9 @@ const daysSince = (iso) => (iso ? Math.floor((Date.now() - new Date(iso).getTime
  */
 export function draftMessage(listing, offerResult) {
   if (!offerResult?.ok) return null;
-  const title = listing.title ?? "el vehículo";
+  // Facebook titles carry trailing whitespace ("2008 CITROEN PICASSO 2.0 "),
+  // which put a space before the full stop in the draft a human is about to send.
+  const title = String(listing.title ?? "").trim() || "el vehículo";
   const days = daysSince(listing.listedAt ?? listing.listed_at);
   const drops = Number(listing.priceChangeCount ?? listing.price_change_count) || 0;
   const cur = offerResult.currency ?? "";

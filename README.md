@@ -336,8 +336,25 @@ de 3x, gana la descripción y queda registrado en `mileageConflict`.
 Cada listing guarda su desglose completo: cada subscore con su peso y su
 contribución, de modo que el ranking siempre se puede explicar.
 
-- **v1** (grilla): `price`, `priceDrop`, `staleness`, `priceChanges`
-- **v2** (+ detalle): agrega `km` (km/año, no km absolutos), `flags`, `seller`
+- **v1** (grilla): `price`, `priceDrop`, `staleness`, `priceChanges`, `km`, `seller`
+- **v2** (+ detalle): los mismos, más `flags`, y con los datos estructurados del
+  detalle en vez de las pistas de la grilla
+
+v1 no es sólo un ranking: es lo que decide **a quién se le abre la publicación**,
+y abrir una cuesta una navegación con rate limit. Rankeando sólo por precio, las
+5 navegaciones de una corrida se fueron enteras a avisos que después se
+descartaban —el precio de una automotora se ve excelente justamente porque es la
+entrega de un plan—. Por eso v1 gasta parte de su peso en las dos señales que
+predicen una navegación desperdiciada: el vendedor y el km/año.
+
+Las pistas de la grilla (`mileageHint` del subtítulo, `vehicleYearHint` del
+título) son peores que los campos estructurados del detalle, pero son las que
+están disponibles antes de gastar la navegación.
+
+El veredicto de automotora en v1 es **gradual**, no binario: un título que dice
+"… NOAHCARS" da 0.5 contra un umbral de 0.6. No alcanza para afirmar que es una
+automotora, pero está lejos de ser nada, así que baja el score sin descalificar.
+La decisión firme se toma en v2, con la descripción a la vista.
 
 `staleness` usa el `creation_time` de Facebook, no `first_seen_at`: la
 antigüedad real está disponible desde la primera corrida.

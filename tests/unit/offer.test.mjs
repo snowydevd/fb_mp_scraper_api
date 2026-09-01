@@ -106,3 +106,11 @@ test("the draft admits the price is fair instead of lowballing", () => {
   assert.match(msg, /razonable/);
   assert.ok(!msg.includes("5.990"), "the draft must not quote the asking price back as the offer");
 });
+
+test("the draft is clean prose even when Facebook's title is not", () => {
+  const r = suggestOffer({ price: 6_500, currencyResolved: "USD" }, { median: 7_500, isReliable: true, sampleSize: 9, currency: "USD" });
+  const msg = draftMessage({ title: "2008 CITROEN PICASSO 2.0 " }, r);
+  assert.match(msg, /Me interesa 2008 CITROEN PICASSO 2\.0\./, "no space before the full stop");
+  assert.ok(!msg.includes("  "), "no double spaces in something a person is about to send");
+  assert.match(draftMessage({ title: "   " }, r), /Me interesa el vehículo\./);
+});

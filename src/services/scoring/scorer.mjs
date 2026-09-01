@@ -7,7 +7,7 @@
  * are comparable, and each carries the raw input it was derived from.
  */
 import { evaluateFlags } from "./flags.mjs";
-import { detectDealer, DEALER_HIGH_CONFIDENCE } from "./dealer.mjs";
+import { detectDealer, DEALER_HIGH_CONFIDENCE, DEALER_THRESHOLD } from "./dealer.mjs";
 
 const clamp = (v, lo = -1, hi = 1) => Math.max(lo, Math.min(hi, v));
 
@@ -22,7 +22,15 @@ export const SCALES = {
   kmPerYearSuspiciouslyLow: 4_000,
 };
 
-export const WEIGHTS_V1 = { price: 0.55, priceDrop: 0.20, staleness: 0.15, priceChanges: 0.10 };
+/**
+ * v1 decides which listings get their detail page opened, and opening one costs
+ * a rate-limited navigation. In the run of 2026-09-01 all five detail fetches
+ * went to listings that were then thrown away - four financed, one dealership -
+ * because v1 ranked purely on price and a dealership's advertised price looks
+ * excellent. So v1 now spends part of its weight on the two signals that
+ * predict a wasted fetch: the seller, and mileage per year.
+ */
+export const WEIGHTS_V1 = { price: 0.42, priceDrop: 0.16, staleness: 0.12, priceChanges: 0.08, km: 0.12, seller: 0.10 };
 export const WEIGHTS_V2 = { price: 0.38, priceDrop: 0.14, staleness: 0.10, priceChanges: 0.06, km: 0.14, flags: 0.10, seller: 0.08 };
 
 const daysBetween = (from, to = new Date()) => {
@@ -136,6 +144,22 @@ export function sellerSubscore(listing) {
       dealer: verdict,
     };
   }
+  // Suspicion below the threshold still counts. Treating the verdict as a
+  // yes/no threw away real evidence: a title reading "… NOAHCARS" scores 0.5
+  // on its own - short of the 0.6 needed to call it a dealership, but far from
+  // nothing - and the listing ranked identically to a private sale. That
+  // matters most in v1, where the title is all there is and the ranking decides
+  // whose detail page is worth a rate-limited navigation.
+  if (verdict.score > 0) {
+    const graded = -Math.min(0.9, verdict.score / DEALER_THRESHOLD);
+    return {
+      value: Math.min(graded, byCount.applicable ? byCount.value : 0),
+      applicable: true,
+      activeCount: activeCount ?? undefined,
+      reason: "possible dealer",
+      dealer: verdict,
+    };
+  }
   return { ...byCount, dealer: verdict };
 }
 
@@ -174,7 +198,15 @@ function compose(subscores, baseWeights, priceReliable, version) {
   };
 }
 
-/** Fase 4: everything obtainable from the search grid alone. */
+/**
+ * Fase 4: everything obtainable from the search grid alone.
+ *
+ * The grid has no description, so the seller subscore here sees only the title
+ * and the seller's listing count - deliberately weaker than v2's. It is enough
+ * for a listing that names its own dealership in the title ("… NOAHCARS"),
+ * which is most of them, and that is all this needs to do: stop the detail
+ * budget being spent on listings that v2 will disqualify anyway.
+ */
 export function scoreV1(listing, reference) {
   const price = listing.price == null ? null : Number(listing.price);
   const ref = reference ? { ...reference, listingCurrency: listing.currencyResolved ?? listing.currency_resolved } : null;
@@ -186,8 +218,17 @@ export function scoreV1(listing, reference) {
       firstSeenAt: listing.firstSeenAt ?? listing.first_seen_at,
     }),
     priceChanges: priceChangeScore(listing.priceChangeCount ?? listing.price_change_count),
+    // Grid hints, not the detail page's structured fields: the subtitle's
+    // mileage and the year written into the title.
+    km: kmScore({
+      mileageKm: listing.mileageKm ?? listing.mileage_km ?? listing.mileageHint,
+      vehicleYear: listing.vehicleYear ?? listing.vehicle_year ?? listing.vehicleYearHint,
+    }),
+    seller: sellerSubscore({ ...listing, description: null }),
   };
-  return compose(subscores, WEIGHTS_V1, !!ref?.isReliable, "v1");
+  const result = compose(subscores, WEIGHTS_V1, !!ref?.isReliable, "v1");
+  result.dealer = subscores.seller.dealer;
+  return result;
 }
 
 /** Fase 5: adds the signals that only the detail page can supply. */

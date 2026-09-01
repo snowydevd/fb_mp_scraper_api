@@ -100,7 +100,10 @@ test("scoreV1: a cheap, stale, twice-reduced listing outranks a fresh full-price
 
 test("scoreV1: breakdown explains every subscore with its weight and contribution", () => {
   const r = scoreV1({ price: 8_000, listedAt: daysAgo(10), currencyResolved: "USD" }, reliableRef);
-  assert.deepEqual(Object.keys(r.breakdown).sort(), ["price", "priceChanges", "priceDrop", "staleness"]);
+  // km and seller are here because v1 is what spends the detail-fetch budget:
+  // ranking on price alone sent all five of a run's fetches to listings that
+  // v2 then disqualified.
+  assert.deepEqual(Object.keys(r.breakdown).sort(), ["km", "price", "priceChanges", "priceDrop", "seller", "staleness"]);
   for (const sub of Object.values(r.breakdown)) {
     assert.ok("weight" in sub && "contribution" in sub);
   }
@@ -165,4 +168,46 @@ test("scoreV2: a disqualified listing is forced to the bottom despite a great pr
   assert.equal(financed.disqualified, true);
   assert.equal(financed.score, -1);
   assert.ok(normal.score > financed.score);
+});
+
+// The detail budget is the scarce resource: opening a listing costs a
+// rate-limited navigation, and in the run of 2026-09-01 all five went to
+// listings that v2 then threw away.
+test("scoreV1: a listing that names its dealership in the title loses its place in the queue", () => {
+  const base = { price: 5_990, listedAt: daysAgo(5), currencyResolved: "USD" };
+  const priv = scoreV1({ ...base, title: "Fiat uno way divino con A/C" }, reliableRef);
+  const dealer = scoreV1({ ...base, title: "Fiat uno way divino con A/C NOAHCARS" }, reliableRef);
+  assert.ok(priv.score > dealer.score, "the dealership must rank below an identical private listing");
+  // A title alone is suspicion, not a verdict: "NOAHCARS" scores 0.5 against a
+  // threshold of 0.6. It demotes the listing without claiming to be sure, and
+  // the real call is made in v2 once the description is in hand.
+  assert.equal(dealer.dealer.isDealer, false);
+  assert.ok(dealer.dealer.score > 0);
+  assert.equal(dealer.breakdown.seller.reason, "possible dealer");
+  assert.equal(priv.dealer.score, 0);
+});
+
+test("scoreV1: the grid's own hints feed the km subscore", () => {
+  const fresh = scoreV1(
+    { price: 8_000, listedAt: daysAgo(5), currencyResolved: "USD", mileageHint: 60_000, vehicleYearHint: 2015 },
+    reliableRef
+  );
+  const worn = scoreV1(
+    { price: 8_000, listedAt: daysAgo(5), currencyResolved: "USD", mileageHint: 330_000, vehicleYearHint: 2015 },
+    reliableRef
+  );
+  assert.equal(fresh.breakdown.km.applicable, true, "the hints must actually be read");
+  assert.ok(fresh.score > worn.score);
+});
+
+test("scoreV1: a listing with no hints simply does not get a km subscore", () => {
+  const r = scoreV1({ price: 8_000, listedAt: daysAgo(5), currencyResolved: "USD" }, reliableRef);
+  assert.equal(r.breakdown.km.applicable, false);
+  assert.equal(r.breakdown.km.contribution, 0, "an inapplicable subscore contributes nothing");
+});
+
+test("scoreV1 never disqualifies: that needs the description, which the grid lacks", () => {
+  const r = scoreV1({ price: 5_990, listedAt: daysAgo(5), currencyResolved: "USD", title: "Fiat uno NOAHCARS" }, reliableRef);
+  assert.notEqual(r.disqualified, true, "a grid-only verdict must demote, not decide");
+  assert.ok(r.score > -1);
 });
