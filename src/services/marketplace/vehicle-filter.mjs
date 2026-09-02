@@ -77,6 +77,26 @@ function isSubject(text, term) {
 }
 
 /**
+ * No son autos aunque el vendedor los publique en "Autos y camionetas".
+ *
+ * Sólo marcas que en Uruguay son EXCLUSIVAMENTE de moto: Suzuki y Honda hacen
+ * las dos cosas, así que ponerlas acá se llevaría puestos autos de verdad. Para
+ * el resto se usa el tipo de vehículo, que es inequívoco.
+ */
+export const NOT_A_CAR = [
+  /\bmotos?\b/, /\bmotocicletas?\b/, /\bciclomotor\b/, /\bscooters?\b/,
+  /\bcuatricicl\w*/, /\bquad\b/, /\bjet ?ski\b/, /\blanchas?\b/,
+  /\btrailers?\b/, /\bremolques?\b/, /\bcasa rodante\b/, /\bmotorhome\b/,
+  /\btractor(?:es)?\b/, /\bretroexcavadora\b/, /\bmontacargas?\b/,
+  // marcas sólo de moto
+  /\bhusqvarna\b/, /\bktm\b/, /\bvespa\b/, /\bzanella\b/, /\byumbo\b/,
+  /\bbaccio\b/, /\bmotomel\b/, /\bgilera\b/, /\bbajaj\b/, /\broyal enfield\b/,
+  /\bharley\b/, /\bwinner\b/, /\bkeeway\b/,
+  // publicaciones genéricas de agencia, sin un auto concreto
+  /\bvehiculos? varios\b/, /\bautos? varios\b/, /\bconsultar? stock\b/,
+];
+
+/**
  * @param {object} listing  item de la grilla ya mapeado
  * @returns {{ok:boolean, reason?:string, matched?:string}}
  */
@@ -88,6 +108,11 @@ export function isVehicleListing(listing) {
 
   const title = normalizeText(listing.title);
   if (!title) return { ok: true }; // sin título no hay evidencia; que decida el resto del pipeline
+
+  for (const re of NOT_A_CAR) {
+    const m = title.match(re);
+    if (m) return { ok: false, reason: "no es un auto", matched: m[0] };
+  }
 
   for (const re of PART_TERMS_STRONG) {
     const m = title.match(re);

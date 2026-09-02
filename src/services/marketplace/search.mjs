@@ -8,7 +8,7 @@
 import { config } from "../../config.mjs";
 import { ScraperError, ERROR_CODES, waitForOutcome } from "../scraper.mjs";
 import { buildVehicleUrl } from "./url.mjs";
-import { extractRelayNodes, mapListings } from "./extract.mjs";
+import { extractRelayNodes, mapListings, collectGraphqlListings } from "./extract.mjs";
 import {
   getBrowser,
   newSessionContext,
@@ -20,17 +20,33 @@ import {
 
 const { scraper } = config;
 
+/**
+ * Scrollea para que Facebook pida la página siguiente.
+ *
+ * No corta cuando `body.scrollHeight` deja de crecer: la grilla está
+ * virtualizada, así que la altura se estabiliza mientras las consultas GraphQL
+ * siguen trayendo avisos. Cortar ahí dejaba el caudal en la primera página.
+ * También se empuja el contenedor con scroll propio, que es el que Marketplace
+ * usa de verdad.
+ */
 async function scrollToLoadMore(page) {
-  let previous = 0;
+  let sinCambio = 0;
+  let anterior = 0;
   for (let i = 0; i < scraper.scrollPasses; i++) {
-    const height = await page.evaluate(() => {
+    const altura = await page.evaluate(() => {
       window.scrollTo(0, document.body.scrollHeight);
+      const cont = [...document.querySelectorAll("div")]
+        .filter((d) => d.scrollHeight > d.clientHeight + 200)
+        .sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+      if (cont) cont.scrollTop = cont.scrollHeight;
       return document.body.scrollHeight;
     });
-    if (height === previous) break;
-    previous = height;
+    // Dos pasadas sin que crezca nada: ahí sí se terminó.
+    sinCambio = altura === anterior ? sinCambio + 1 : 0;
+    anterior = altura;
+    if (sinCambio >= 2) break;
     // Short, jittered pause - a fixed 700ms cadence is a bot signature.
-    await page.waitForTimeout(500 + Math.floor(Math.random() * 700));
+    await page.waitForTimeout(900 + Math.floor(Math.random() * 900));
   }
 }
 
@@ -41,6 +57,8 @@ async function runSearch(filters) {
 
   try {
     const page = await context.newPage();
+    // Antes de navegar: la primera consulta GraphQL sale durante la carga.
+    const graphql = collectGraphqlListings(page);
     log("info", `vehicles ${f.location}/${f.category} session=${hasSession}`, url);
 
     let response;
@@ -89,7 +107,17 @@ async function runSearch(filters) {
 
     await scrollToLoadMore(page);
 
-    const nodes = await extractRelayNodes(page);
+    // Las dos fuentes del MISMO payload de Relay: el `<script>` que renderizó
+    // el servidor (primera página) y las respuestas GraphQL que trajo el
+    // scroll (el resto). Se fusionan por id.
+    const desdeScript = await extractRelayNodes(page);
+    const desdeGraphql = await graphql.nodes();
+    graphql.stop();
+    const porId = new Map();
+    for (const n of [...desdeScript, ...desdeGraphql]) if (n?.id) porId.set(String(n.id), n);
+    const nodes = [...porId.values()];
+    log("info", `nodos: ${desdeScript.length} del <script> + ${desdeGraphql.length} de graphql -> ${nodes.length} únicos`);
+
     if (nodes.length === 0) {
       // Cards were on screen but the Relay payload held none: a real schema
       // change, not an empty result. Fail loudly rather than return [].

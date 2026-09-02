@@ -174,16 +174,30 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
   // rara vez llegan. Pasado el tope se desconfía del veredicto y se abre el
   // detalle igual — la degradación del score sigue aplicando, y v2 decide con
   // la descripción a la vista, que es donde la decisión es firme.
+  //
+  // El tope mira SÓLO los veredictos de texto. Un vendedor con 16 publicaciones
+  // activas es una automotora y punto: eso no es una heurística que pueda
+  // dispararse de más, es un conteo. Aplicarle el tope hacía que, justo cuando
+  // la evidencia es más dura, se la desconfiara más — y con la sesión puesta
+  // los nodos de GraphQL traen seller_id (los del <script> venían vacíos), así
+  // que esa evidencia pasó a existir. Medido en vivo: 4 vendedores concentraban
+  // 34 de 49 avisos, y el tope los estaba dando por buenos.
   const rejected = [];
-  const gridDealerShare = scored.length ? dealerIds.size / scored.length : 0;
-  const trustGridSkip = gridDealerShare <= GRID_DEALER_SKIP_MAX_SHARE;
+  const porTexto = scored.filter((s) => s.dealer?.isDealer && !s.dealer.signals.some((x) => x.decisive));
+  const textoShare = scored.length ? porTexto.length / scored.length : 0;
+  const trustGridSkip = textoShare <= GRID_DEALER_SKIP_MAX_SHARE;
   if (!trustGridSkip) {
     log("error",
-      `la grilla marcó ${dealerIds.size}/${scored.length} como automotoras (${Math.round(gridDealerShare * 100)}%), ` +
-      `por encima del ${Math.round(GRID_DEALER_SKIP_MAX_SHARE * 100)}% esperable: se desconfía del veredicto y se abre el detalle igual`);
+      `la grilla marcó ${porTexto.length}/${scored.length} como automotoras SÓLO por texto ` +
+      `(${Math.round(textoShare * 100)}%, por encima del ${Math.round(GRID_DEALER_SKIP_MAX_SHARE * 100)}% esperable): ` +
+      `se desconfía de esos veredictos y se les abre el detalle igual`);
   }
   const eligible = scored.filter((s) => {
-    if (!trustGridSkip || !s.dealer?.isDealer) return true;
+    if (!s.dealer?.isDealer) return true;
+    // Un veredicto decisivo (conteo de publicaciones, o el campo estructurado
+    // de Facebook) no lo tapa el tope.
+    const decisivo = s.dealer.signals.some((x) => x.decisive);
+    if (!decisivo && !trustGridSkip) return true;
     rejected.push({
       id: s.listing.id,
       title: s.listing.title,
@@ -273,6 +287,7 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
     scored: scored.length,
     gridDealers: dealerIds.size,
     detailSkippedAsDealer: scored.length - eligible.length,
+    gridDealersPorTexto: porTexto.length,
     gridDealerSkipTrusted: trustGridSkip,
     detailFetched: candidates.length,
     queued: queue.length,

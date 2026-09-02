@@ -145,8 +145,34 @@ devuelve resultados, verificado— **pero corta en 24 resultados**:
 | precio 0–100000 | 24 |
 | 5000–12000 con `SCRAPER_SCROLL_PASSES=10` | 24 |
 
-Ese tope es el techo real del caudal, no el filtro de precio: mover el rango
-cambia **cuáles** 24 ves, no **cuántos**.
+Ese tope **no era de Facebook, era nuestro**. El payload embebido en `<script>`
+sólo trae la primera página, la que renderizó el servidor. Medido con sesión
+puesta, scrolleando:
+
+| | inicial | scroll 1 | scroll 2 | scroll 3+ |
+| --- | ---: | ---: | ---: | ---: |
+| nodos en `<script>` | 24 | 24 | 24 | 24 |
+| anchors en el DOM | 21 | **42** | 22 | 22 |
+| consultas GraphQL | 9 | 10 | 14 | 14 |
+
+El scroll **sí** trae más avisos —las consultas GraphQL suben— pero no van a los
+`<script>`, y leer el DOM tampoco sirve porque la grilla está **virtualizada**:
+los nodos saltaron a 42 y volvieron a 22 cuando Facebook recicló los que salieron
+de pantalla.
+
+Lo único que persiste es la respuesta. `collectGraphqlListings` engancha las
+respuestas de `/api/graphql` y saca de ahí los nodos, que son el MISMO JSON de
+Relay servido por la red: sigue valiendo la regla de preferirlo antes que los
+selectores. Se fusiona con lo del `<script>` por id.
+
+Resultado medido: **24 → 49 avisos** con las 3 pasadas de scroll por defecto.
+`SCRAPER_SCROLL_PASSES` es ahora la palanca del caudal.
+
+Y algo que sólo aparece con sesión: **los nodos de GraphQL traen `seller_id`**,
+que los del `<script>` traían vacío. Eso convierte la detección de automotoras
+de heurística de texto en un conteo. En una corrida real: 18 vendedores para 49
+avisos, y **4 de ellos concentraban 34** —uno solo tenía 16 publicaciones
+activas—. Esas 34 se saltean sin gastar una navegación.
 
 ```bash
 npm run fb:login    # abre Chromium, logueás a mano, guarda la sesión y el .env
@@ -336,6 +362,13 @@ en ningún log, simplemente nunca aparece. Por eso `vehicle-filter.mjs`:
   tapa de válvulas. El **débil** (`motor`, `caja`, `puerta`, `asiento`) sólo
   cuenta si la pieza es el **sujeto** del título — "Motor Fiat Uno 1.4" es un
   motor, "Fiat Uno 1.4 motor impecable" es un auto.
+
+También se cortan los **vehículos que no son autos** publicados igual en "Autos
+y camionetas": motos, cuatriciclos, trailers, casas rodantes, y las
+publicaciones genéricas de agencia ("Vehículos varios", "Consultar stock").
+Visto en vivo: un "2017 husqvarna fc" —una moto de cross— con la categoría de
+autos. Sólo se usan marcas que en Uruguay son EXCLUSIVAMENTE de moto: Suzuki y
+Honda hacen las dos cosas, y ponerlas en esa lista se llevaría autos de verdad.
 
 El corte va **antes de persistir**, porque un repuesto no sólo ensucia la cola:
 entra a `listings`, se puntúa, y sobre todo entra en la mediana interna de

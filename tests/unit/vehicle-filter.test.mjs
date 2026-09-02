@@ -136,3 +136,26 @@ test("un kilometraje de grilla que ES el precio se descarta", async () => {
   assert.equal(kilometrajePlausible(90_000, null), 90_000);
   assert.equal(kilometrajePlausible(null, 5_000), null);
 });
+
+// --- no todo lo que tiene ruedas es un auto -------------------------------
+test("motos y otros vehículos publicados en la categoría de autos se cortan", () => {
+  // Visto en vivo dentro de la categoría 807311116002614.
+  assert.equal(t("2017 husqvarna fc").ok, false);
+  assert.equal(t("Vehículos varios").ok, false);
+  for (const titulo of ["Moto Yamaha 150", "Cuatriciclo 250cc", "KTM 390 Duke",
+                        "Trailer para auto", "Casa rodante", "Scooter 125", "Lancha con motor"]) {
+    assert.equal(t(titulo).ok, false, `debería cortar "${titulo}"`);
+  }
+});
+
+// Suzuki y Honda hacen autos Y motos: ponerlas en la lista de marcas de moto
+// se llevaría puestos autos de verdad.
+test("las marcas que hacen autos y motos no se cortan por la marca", () => {
+  assert.equal(t("Suzuki Alto 800 GA - 2022").ok, true);
+  assert.equal(t("Honda Fit 2014").ok, true);
+  assert.equal(t("Suzuki Celerio 2014").ok, true);
+});
+
+test("un auto con 'motor' en el título no se confunde con una moto", () => {
+  assert.equal(t("BYD F0 GLX-I MOTOR 1.0 — AÑO 2015").ok, true);
+});

@@ -26,6 +26,71 @@ const LISTING_TYPENAME = "GroupCommerceProductItem";
  * Returns raw Facebook nodes; mapping happens in `mapListing` so it can be
  * unit-tested against fixtures without a browser.
  */
+/**
+ * Camina cualquier objeto buscando nodos de listing. Mismo criterio que el
+ * lector de `<script>`: se identifica por `__typename`, no por posición.
+ */
+function recolectarNodos(raiz, destino) {
+  const visit = (o) => {
+    if (!o || typeof o !== "object") return;
+    if (Array.isArray(o)) { for (const v of o) visit(v); return; }
+    if (o.__typename === LISTING_TYPENAME && o.id) destino.set(String(o.id), o);
+    for (const k in o) visit(o[k]);
+  };
+  visit(raiz);
+}
+
+/**
+ * Junta los avisos que llegan por GraphQL mientras se scrollea.
+ *
+ * El payload embebido en `<script>` sólo trae la primera página, la que
+ * renderizó el servidor: medido en vivo, se queda en 24 por más que se
+ * scrollee. Y leer el DOM tampoco sirve, porque la grilla está VIRTUALIZADA —
+ * los nodos subieron de 21 a 42 con el primer scroll y volvieron a 22 con el
+ * segundo, porque Facebook recicla los que salen de pantalla—.
+ *
+ * Lo único que persiste es la respuesta: cada scroll dispara una consulta
+ * GraphQL con la página siguiente. Es el mismo JSON de Relay, sólo que por la
+ * red, así que sigue valiendo la regla de preferirlo antes que los selectores.
+ */
+export function collectGraphqlListings(page) {
+  const nodos = new Map();
+  const pendientes = new Set();
+
+  const onResponse = (res) => {
+    if (!res.url().includes("/api/graphql")) return;
+    const p = (async () => {
+      try {
+        const texto = await res.text();
+        // Facebook manda varios objetos JSON separados por salto de línea en
+        // una misma respuesta; parsear el cuerpo entero de una falla.
+        for (const linea of texto.split("\n")) {
+          const t = linea.trim();
+          if (!t.startsWith("{")) continue;
+          try { recolectarNodos(JSON.parse(t), nodos); } catch { /* trozo parcial */ }
+        }
+      } catch {
+        // Respuesta abortada o sin cuerpo: no es un error del scrapeo.
+      }
+    })();
+    pendientes.add(p);
+    p.finally(() => pendientes.delete(p));
+  };
+
+  page.on("response", onResponse);
+
+  return {
+    /** Espera a que terminen las lecturas en curso y devuelve lo juntado. */
+    async nodes() {
+      await Promise.allSettled([...pendientes]);
+      return [...nodos.values()];
+    },
+    stop() {
+      page.off("response", onResponse);
+    },
+  };
+}
+
 export async function extractRelayNodes(page) {
   const result = await page.evaluate((typeName) => {
     const nodes = [];
