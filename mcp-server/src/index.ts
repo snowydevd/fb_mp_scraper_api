@@ -174,10 +174,12 @@ server.registerTool(
     title: "List scored buying opportunities",
     description:
       "The ranked opportunities the worker has scored, best first. Reads the " +
-      "database - it never scrapes Facebook, so it is free to call. Every row " +
-      "carries the full score `breakdown`, so a ranking can always be " +
-      "explained subscore by subscore. Dealerships are excluded by default: " +
-      "they price at retail and there is no margin to negotiate.",
+      "database - it never scrapes Facebook, so it is free to call. Ranking is " +
+      "driven mainly by mileage and declared debt; price does NOT score, since " +
+      "the search already bounds it and a human judges it. Every row carries " +
+      "the full `breakdown`, so a ranking can always be explained subscore by " +
+      "subscore. Dealerships are excluded by default: they price at retail and " +
+      "there is no margin to negotiate.",
     inputSchema: {
       limit: z.number().int().positive().max(200).optional().describe("Max rows (default 50)"),
       minScore: z.number().optional().describe("Only listings scoring at or above this (-1 to 1)"),
@@ -199,9 +201,7 @@ server.registerTool(
 const contactEntrySchema = z.object({
   id: z.number(),
   listing_id: z.string(),
-  suggested_offer: z.union([z.string(), z.number()]),
-  currency: z.string(),
-  rationale: z.unknown(),
+  facts: z.unknown(),
   message_draft: z.string(),
   status: z.string(),
   title: z.string().nullable(),
@@ -213,11 +213,13 @@ server.registerTool(
   {
     title: "List contact drafts awaiting review",
     description:
-      "Suggested offers and message drafts for listings that cleared the " +
-      "threshold. NOTHING here has been sent: automated Messenger outreach is " +
-      "the fastest way to lose the account, so every entry waits for a person " +
-      "to approve and send it by hand. This tool is read-only by design - " +
-      "approving or discarding a draft is a human decision, made through " +
+      "Message drafts for listings that cleared the threshold, each with the " +
+      "facts needed to judge it: mileage (absolute and per year), declared " +
+      "debt, days listed and price drops. There is deliberately NO suggested " +
+      "amount - the price is a human decision. NOTHING here has been sent " +
+      "either: automated Messenger outreach is the fastest way to lose the " +
+      "account, so every entry waits for a person to approve and send it by " +
+      "hand. Read-only by design; approving or discarding goes through " +
       "PATCH /api/contact-queue/:id.",
     inputSchema: {
       status: z.enum(["pending", "approved", "discarded", "sent", "all"]).optional()

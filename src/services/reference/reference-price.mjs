@@ -1,17 +1,16 @@
 /**
- * Fase 3: market reference price for a make/model/year band.
+ * Mediana del propio lote de Facebook, como CONTEXTO para que una persona mire
+ * el precio — ya no puntúa.
  *
- * Two sources, in order:
- *   meli     - MercadoLibre comparables (needs credentials)
- *   internal - the median of our own active listings for the same band
+ * Antes esto alimentaba el subscore de precio, con MercadoLibre como fuente
+ * primaria. MercadoLibre bloqueó /sites/{site}/search (403 con token de usuario
+ * válido y todo lo demás respondiendo), y la mediana del lote de Facebook se
+ * compara contra sí misma, así que ninguna de las dos servía para decidir un
+ * ranking. Quien juzga el precio sos vos; esto sólo te dice contra qué.
  *
- * Outliers are trimmed to the p10-p90 band before the median: classifieds are
- * full of placeholder prices (1, 111111, 1000000 all appeared in a single
- * Facebook page) and a raw median is not robust to them. The sample size rides
- * along so a caller can refuse to lean on a thin comparable set.
+ * Los outliers se recortan al rango p10-p90 antes de la mediana: en una sola
+ * página de Facebook aparecieron precios de 1, 111111 y 1000000.
  */
-import { config } from "../../config.mjs";
-import * as meli from "./meli.mjs";
 
 export const MIN_RELIABLE_SAMPLE = 5;
 
@@ -41,36 +40,8 @@ export function robustMedian(values) {
   };
 }
 
-function expiry() {
-  return new Date(Date.now() + config.meli.cacheTtlHours * 3600 * 1000).toISOString();
-}
-
-/**
- * Compute a reference from MercadoLibre. Throws MeliUnavailableError when
- * credentials are missing or rejected, so the caller can fall back.
- */
-export async function referenceFromMeli({ make, model, yearFrom, yearTo, currency = "USD" }) {
-  const { prices } = await meli.searchComparables({ make, model, yearFrom, yearTo });
-  const sameCurrency = prices.filter((p) => p.currency === currency).map((p) => p.price);
-  const stats = robustMedian(sameCurrency);
-  return {
-    make, model, yearFrom, yearTo, currency,
-    median: stats.median,
-    p10: stats.p10,
-    p90: stats.p90,
-    sampleSize: stats.kept,
-    discarded: stats.discarded,
-    source: "meli",
-    isReliable: stats.kept >= MIN_RELIABLE_SAMPLE && stats.median != null,
-    expiresAt: expiry(),
-  };
-}
-
-/**
- * Fallback reference built from our own active listings. Self-referential by
- * construction: it says how a listing compares to the rest of the Facebook
- * market, not to fair value. Marked as such so the scorer can down-weight it.
- */
+/** Autorreferencial por construcción: dice cómo se compara un aviso contra el
+ * resto de Facebook, no contra valor de mercado. Por eso es contexto y no score. */
 export function referenceFromInternal({ make, model, yearFrom, yearTo, currency = "USD" }, rows) {
   const values = rows
     .filter((r) => (r.currency_resolved || r.currency) === currency)
@@ -86,6 +57,5 @@ export function referenceFromInternal({ make, model, yearFrom, yearTo, currency 
     discarded: stats.discarded,
     source: "internal",
     isReliable: stats.kept >= MIN_RELIABLE_SAMPLE && stats.median != null,
-    expiresAt: expiry(),
   };
 }

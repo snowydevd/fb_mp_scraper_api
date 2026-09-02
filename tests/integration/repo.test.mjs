@@ -123,25 +123,6 @@ test("a later grid upsert does not erase the detail we already paid for", opts, 
   assert.ok(rows[0].description);
 });
 
-test("reference_prices caches and expires", opts, async () => {
-  const ref = {
-    make: "Chevrolet", model: "Corsa", yearFrom: 2006, yearTo: 2010, currency: "USD",
-    median: 6900, p10: 5200, p90: 8800, sampleSize: 17, source: "meli", isReliable: true,
-    expiresAt: new Date(Date.now() + 3600_000).toISOString(),
-  };
-  await repo.saveReference(ref);
-  const fresh = await repo.getFreshReference({ ...ref, source: "meli" });
-  assert.ok(fresh, "a fresh row must come back");
-  assert.equal(Number(fresh.median_price), 6900);
-
-  await repo.saveReference({ ...ref, median: 7100, expiresAt: new Date(Date.now() - 1000).toISOString() });
-  const stale = await repo.getFreshReference({ ...ref, source: "meli" });
-  assert.equal(stale, null, "an expired row must not be served");
-
-  const { rows } = await pool.query("SELECT count(*)::int n FROM reference_prices");
-  assert.equal(rows[0].n, 1, "the same band must upsert, not accumulate");
-});
-
 test("saveScore keeps one current score per listing, with its breakdown", opts, async () => {
   await repo.saveScore({ listingId: "100000000000001", score: 0.31, version: "v1", breakdown: { price: { value: 1 } } });
   await repo.saveScore({ listingId: "100000000000001", score: 0.47, version: "v2", breakdown: { price: { value: 1 }, seller: { value: 0.1 } } });
@@ -154,24 +135,24 @@ test("saveScore keeps one current score per listing, with its breakdown", opts, 
 
 test("the contact queue is owned by a human: the worker cannot overwrite a decision", opts, async () => {
   const entry = {
-    listingId: "100000000000001", suggestedOffer: 5800, currency: "USD",
-    rationale: { asking: 6200, marketMedian: 6900, anchoredTo: "asking_cash_discount" },
+    listingId: "100000000000001",
+    facts: { price: 6200, currency: "USD", mileageKm: 143_000, declaredDebt: null },
     messageDraft: "Hola, buenas.",
   };
   const first = await repo.enqueueContact(entry);
   assert.deepEqual({ written: first.written, inserted: first.inserted }, { written: true, inserted: true });
 
-  const refreshed = await repo.enqueueContact({ ...entry, suggestedOffer: 5700 });
+  const refreshed = await repo.enqueueContact({ ...entry, facts: { ...entry.facts, price: 6000 } });
   assert.equal(refreshed.written, true, "a pending draft may be refreshed");
 
   const approved = await repo.setContactStatus(first.id, "approved");
   assert.equal(approved.status, "approved");
 
-  const blocked = await repo.enqueueContact({ ...entry, suggestedOffer: 5000 });
+  const blocked = await repo.enqueueContact({ ...entry, facts: { ...entry.facts, price: 1 } });
   assert.equal(blocked.written, false, "an approved draft must not change under whoever is about to send it");
 
-  const { rows } = await pool.query("SELECT suggested_offer, status FROM contact_queue WHERE listing_id = $1", ["100000000000001"]);
-  assert.equal(Number(rows[0].suggested_offer), 5700);
+  const { rows } = await pool.query("SELECT facts, status FROM contact_queue WHERE listing_id = $1", ["100000000000001"]);
+  assert.equal(rows[0].facts.price, 6000, "el refresh previo a la aprobación sí quedó");
   assert.equal(rows[0].status, "approved");
 });
 
@@ -240,7 +221,7 @@ test("every table has RLS enabled, and none of them forces it on the owner", opt
       WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'
       ORDER BY relname`
   );
-  assert.ok(rows.length >= 7, `expected the pipeline's tables, got ${rows.length}`);
+  assert.ok(rows.length >= 6, `expected the pipeline's tables, got ${rows.length}`);
   for (const t of rows) {
     assert.equal(t.relrowsecurity, true, `${t.relname} is exposed: RLS is off`);
     // FORCE would subject the owner to the policies too - and there are none,

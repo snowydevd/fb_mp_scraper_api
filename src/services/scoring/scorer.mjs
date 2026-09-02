@@ -6,7 +6,7 @@
  * re-running anything. Subscores are normalised to roughly [-1, 1] so weights
  * are comparable, and each carries the raw input it was derived from.
  */
-import { evaluateFlags } from "./flags.mjs";
+import { evaluateByCategory } from "./flags.mjs";
 import { detectDealer, DEALER_HIGH_CONFIDENCE, DEALER_THRESHOLD } from "./dealer.mjs";
 
 const clamp = (v, lo = -1, hi = 1) => Math.max(lo, Math.min(hi, v));
@@ -20,18 +20,68 @@ export const SCALES = {
   kmPerYearNormal: 14_000, // Uruguay: ~13-15k km/year
   kmPerYearBad: 30_000,
   kmPerYearSuspiciouslyLow: 4_000,
+  /**
+   * Kilometraje ABSOLUTO, interpolado entre anclas. Va aparte del km/año a
+   * propósito: miden cosas distintas y las dos importan.
+   *
+   * El km/año dice cómo se usó el auto —uso intenso, o un tablero corregido si
+   * da sospechosamente bajo—. El km absoluto dice cuánta vida le queda, que es
+   * lo que se revende. Un 2008 con 210.000 km hizo 11k/año, o sea uso normal, y
+   * midiendo sólo km/año puntuaba igual que un 2015 con 57.000. Para comprar y
+   * revender no son ni parecidos.
+   */
+  /**
+   * Debajo de esto, en un usado de esta banda de precio, el número no es
+   * creíble. Un auto de USD 5.000-12.000 en Uruguay no tiene 5.000 km: o es un
+   * error de carga, o es un tablero corregido, o —lo más común— es la entrega
+   * de un plan metida en el campo del odómetro. En los tres casos el número no
+   * puede puntuar como excelente.
+   */
+  kmAbsoluteImplausible: 20_000,
+  kmAbsolute: [
+    [80_000, 1.0],
+    [150_000, 0.4],
+    [250_000, -0.3],
+    [350_000, -1.0],
+  ],
 };
 
+/** Interpola linealmente entre las anclas, plano fuera de los extremos. */
+function interpolar(x, anclas) {
+  if (x <= anclas[0][0]) return anclas[0][1];
+  const ultima = anclas[anclas.length - 1];
+  if (x >= ultima[0]) return ultima[1];
+  for (let i = 1; i < anclas.length; i++) {
+    const [x1, y1] = anclas[i - 1];
+    const [x2, y2] = anclas[i];
+    if (x <= x2) return y1 + ((y2 - y1) * (x - x1)) / (x2 - x1);
+  }
+  return ultima[1];
+}
+
 /**
- * v1 decides which listings get their detail page opened, and opening one costs
- * a rate-limited navigation. In the run of 2026-09-01 all five detail fetches
- * went to listings that were then thrown away - four financed, one dealership -
- * because v1 ranked purely on price and a dealership's advertised price looks
- * excellent. So v1 now spends part of its weight on the two signals that
- * predict a wasted fetch: the seller, and mileage per year.
+ * v1 decide a quién se le abre la publicación, y abrir una cuesta una
+ * navegación con rate limit. Sin descripción no hay señal de deuda, así que el
+ * peso se lo llevan el km (de la pista del subtítulo) y el vendedor.
  */
-export const WEIGHTS_V1 = { price: 0.42, priceDrop: 0.16, staleness: 0.12, priceChanges: 0.08, km: 0.12, seller: 0.10 };
-export const WEIGHTS_V2 = { price: 0.38, priceDrop: 0.14, staleness: 0.10, priceChanges: 0.06, km: 0.14, flags: 0.10, seller: 0.08 };
+export const WEIGHTS_V1 = { km: 0.50, seller: 0.28, staleness: 0.15, priceDrop: 0.05, priceChanges: 0.02 };
+/**
+ * v2, con la descripción a la vista. Las dos preguntas que deciden si un auto
+ * vale la pena —cuánto rodó y cuánto debe— se llevan el 68% del peso.
+ *
+ * El PRECIO no puntúa. La banda de precio ya se filtra del lado de Facebook al
+ * buscar, así que todo lo que llega está dentro del presupuesto; y adentro de
+ * esa banda, quién decide si el precio es bueno es una persona, no el scorer.
+ * Sacarlo se llevó puesta toda la maquinaria de precio de referencia, que era
+ * la parte más frágil del sistema: dependía de MercadoLibre —que terminó
+ * bloqueando la búsqueda— o de la mediana del propio lote de Facebook, que se
+ * compara contra sí misma.
+ *
+ * Las tres señales de vendedor motivado quedan con peso chico: son reales pero
+ * necesitan historial, y hoy valen casi cero hasta que el scheduler junte
+ * corridas.
+ */
+export const WEIGHTS_V2 = { km: 0.38, deuda: 0.30, seller: 0.14, condicion: 0.08, staleness: 0.06, priceDrop: 0.03, priceChanges: 0.01 };
 
 const daysBetween = (from, to = new Date()) => {
   if (!from) return null;
@@ -40,24 +90,6 @@ const daysBetween = (from, to = new Date()) => {
 };
 
 // --- individual subscores -------------------------------------------------
-
-export function priceScore(price, reference) {
-  if (price == null || !reference?.median) {
-    return { value: 0, applicable: false, reason: "no price or no market reference" };
-  }
-  if (reference.currency && reference.currency !== (reference.listingCurrency ?? reference.currency)) {
-    return { value: 0, applicable: false, reason: "reference currency differs from listing currency" };
-  }
-  const discount = (reference.median - price) / reference.median;
-  return {
-    value: clamp(discount / SCALES.fullDiscount),
-    applicable: true,
-    discount,
-    median: reference.median,
-    sampleSize: reference.sampleSize,
-    reliable: !!reference.isReliable,
-  };
-}
 
 export function priceDropScore(price, oldPrice) {
   if (price == null || oldPrice == null || oldPrice <= price) {
@@ -90,21 +122,47 @@ export function priceChangeScore(count) {
 }
 
 /**
- * Mileage judged per year, not absolute: 150 000 km on a 2010 car is ordinary,
- * the same figure on a 2022 car is not. Suspiciously low km for the age is
- * penalised too - a rolled-back odometer is a hazard, not a bargain.
+ * Kilometraje: las dos lecturas, y manda la peor.
+ *
+ * Se toma el mínimo y no un promedio porque un auto vale lo que vale su peor
+ * señal: 300.000 km hechos "prolijamente" a 15k por año siguen siendo 300.000
+ * km, y 40.000 km en un año son 40.000 km por más nuevo que sea el auto.
+ *
+ * El km sospechosamente bajo para el año se penaliza igual que el alto: un
+ * tablero corregido es un riesgo, no una ganga.
  */
 export function kmScore({ mileageKm, vehicleYear, now = new Date() }) {
-  if (!mileageKm || !vehicleYear) {
-    return { value: 0, applicable: false, reason: "missing mileage or year" };
+  if (!mileageKm) return { value: 0, applicable: false, reason: "sin kilometraje" };
+
+  if (mileageKm < SCALES.kmAbsoluteImplausible) {
+    return {
+      value: -0.5, applicable: true, mileageKm,
+      reason: `km implausiblemente bajo para un usado (< ${SCALES.kmAbsoluteImplausible.toLocaleString("es-UY")})`,
+    };
   }
+  const absoluto = interpolar(mileageKm, SCALES.kmAbsolute);
+  if (!vehicleYear) {
+    // Sin año no hay km/año, pero el absoluto solo ya dice bastante.
+    return { value: absoluto, applicable: true, mileageKm, absoluto: Number(absoluto.toFixed(3)), reason: "sin año: sólo km absoluto" };
+  }
+
   const age = Math.max(1, now.getFullYear() - vehicleYear);
   const perYear = mileageKm / age;
   if (perYear < SCALES.kmPerYearSuspiciouslyLow) {
-    return { value: -0.5, applicable: true, perYear, age, reason: "implausibly low km for age" };
+    return { value: -0.5, applicable: true, perYear: Math.round(perYear), age, mileageKm, reason: "km implausiblemente bajo para el año" };
   }
-  const ratio = (SCALES.kmPerYearBad - perYear) / (SCALES.kmPerYearBad - SCALES.kmPerYearNormal);
-  return { value: clamp(ratio), applicable: true, perYear: Math.round(perYear), age };
+  const porAno = clamp((SCALES.kmPerYearBad - perYear) / (SCALES.kmPerYearBad - SCALES.kmPerYearNormal));
+
+  return {
+    value: Math.min(porAno, absoluto),
+    applicable: true,
+    mileageKm,
+    perYear: Math.round(perYear),
+    age,
+    porAno: Number(porAno.toFixed(3)),
+    absoluto: Number(absoluto.toFixed(3)),
+    manda: absoluto < porAno ? "km absoluto" : "km por año",
+  };
 }
 
 /** 3+ active listings from one seller reads as a dealer: no margin there. */
@@ -166,22 +224,12 @@ export function sellerSubscore(listing) {
 // --- composition ----------------------------------------------------------
 
 /**
- * When the market reference is thin (< 5 comparables) the price subscore must
- * not decide the ranking, so its weight is cut and redistributed across the
- * signals that don't depend on it.
+ * Suma ponderada, con el desglose completo. Un subscore que no aplica aporta 0
+ * y su peso queda igual: un auto sin km conocido no es un auto con km malo, así
+ * que no se le reparte el peso a los demás — queda por debajo del que tiene km
+ * bueno y por encima del que lo tiene malo.
  */
-function adjustWeights(weights, priceReliable) {
-  if (priceReliable) return { weights, adjusted: false };
-  const reduced = { ...weights, price: weights.price * 0.25 };
-  const freed = weights.price - reduced.price;
-  const others = Object.keys(reduced).filter((k) => k !== "price");
-  const totalOther = others.reduce((s, k) => s + reduced[k], 0);
-  for (const k of others) reduced[k] += freed * (reduced[k] / totalOther);
-  return { weights: reduced, adjusted: true };
-}
-
-function compose(subscores, baseWeights, priceReliable, version) {
-  const { weights, adjusted } = adjustWeights(baseWeights, priceReliable);
+function compose(subscores, weights, version) {
   let score = 0;
   const breakdown = {};
   for (const [key, sub] of Object.entries(subscores)) {
@@ -190,88 +238,75 @@ function compose(subscores, baseWeights, priceReliable, version) {
     score += contribution;
     breakdown[key] = { ...sub, weight: Number(w.toFixed(4)), contribution: Number(contribution.toFixed(4)) };
   }
-  return {
-    score: Number(clamp(score).toFixed(4)),
-    version,
-    weightsAdjustedForThinReference: adjusted,
-    breakdown,
-  };
+  return { score: Number(clamp(score).toFixed(4)), version, breakdown };
 }
 
 /**
- * Fase 4: everything obtainable from the search grid alone.
- *
- * The grid has no description, so the seller subscore here sees only the title
- * and the seller's listing count - deliberately weaker than v2's. It is enough
- * for a listing that names its own dealership in the title ("… NOAHCARS"),
- * which is most of them, and that is all this needs to do: stop the detail
- * budget being spent on listings that v2 will disqualify anyway.
+ * Fase 4: sólo con lo que da la grilla. Sin descripción no hay deuda que medir,
+ * así que esto es apenas el filtro que elige a quién abrirle el detalle.
  */
-export function scoreV1(listing, reference) {
+export function scoreV1(listing) {
   const price = listing.price == null ? null : Number(listing.price);
-  const ref = reference ? { ...reference, listingCurrency: listing.currencyResolved ?? listing.currency_resolved } : null;
   const subscores = {
-    price: priceScore(price, ref),
-    priceDrop: priceDropScore(price, listing.oldPrice ?? listing.old_price ?? null),
-    staleness: stalenessScore({
-      listedAt: listing.listedAt ?? listing.listed_at ?? listing.createdAt,
-      firstSeenAt: listing.firstSeenAt ?? listing.first_seen_at,
-    }),
-    priceChanges: priceChangeScore(listing.priceChangeCount ?? listing.price_change_count),
-    // Grid hints, not the detail page's structured fields: the subtitle's
-    // mileage and the year written into the title.
     km: kmScore({
       mileageKm: listing.mileageKm ?? listing.mileage_km ?? listing.mileageHint,
       vehicleYear: listing.vehicleYear ?? listing.vehicle_year ?? listing.vehicleYearHint,
     }),
     seller: sellerSubscore({ ...listing, description: null }),
-  };
-  const result = compose(subscores, WEIGHTS_V1, !!ref?.isReliable, "v1");
-  result.dealer = subscores.seller.dealer;
-  return result;
-}
-
-/** Fase 5: adds the signals that only the detail page can supply. */
-export function scoreV2(listing, reference) {
-  const price = listing.price == null ? null : Number(listing.price);
-  const ref = reference ? { ...reference, listingCurrency: listing.currencyResolved ?? listing.currency_resolved } : null;
-  const flags = evaluateFlags(`${listing.title ?? ""}\n${listing.description ?? ""}`);
-  const subscores = {
-    price: priceScore(price, ref),
-    priceDrop: priceDropScore(price, listing.oldPrice ?? listing.old_price ?? null),
     staleness: stalenessScore({
       listedAt: listing.listedAt ?? listing.listed_at ?? listing.createdAt,
       firstSeenAt: listing.firstSeenAt ?? listing.first_seen_at,
     }),
+    priceDrop: priceDropScore(price, listing.oldPrice ?? listing.old_price ?? null),
     priceChanges: priceChangeScore(listing.priceChangeCount ?? listing.price_change_count),
+  };
+  const result = compose(subscores, WEIGHTS_V1, "v1");
+  result.dealer = subscores.seller.dealer;
+  return result;
+}
+
+/** Fase 5: con la descripción, que es lo único que dice si el auto debe plata. */
+export function scoreV2(listing) {
+  const price = listing.price == null ? null : Number(listing.price);
+  const cats = evaluateByCategory(`${listing.title ?? ""}\n${listing.description ?? ""}`);
+
+  const subscores = {
     km: kmScore({
       mileageKm: listing.mileageKm ?? listing.mileage_km,
       vehicleYear: listing.vehicleYear ?? listing.vehicle_year,
     }),
-    flags: { value: flags.score, applicable: flags.hits.length > 0, hits: flags.hits, disqualified: flags.disqualified },
+    deuda: { value: cats.deuda.score, applicable: cats.deuda.hits.length > 0, hits: cats.deuda.hits },
     seller: sellerSubscore(listing),
+    condicion: { value: cats.condicion.score, applicable: cats.condicion.hits.length > 0, hits: cats.condicion.hits },
+    staleness: stalenessScore({
+      listedAt: listing.listedAt ?? listing.listed_at ?? listing.createdAt,
+      firstSeenAt: listing.firstSeenAt ?? listing.first_seen_at,
+    }),
+    priceDrop: priceDropScore(price, listing.oldPrice ?? listing.old_price ?? null),
+    priceChanges: priceChangeScore(listing.priceChangeCount ?? listing.price_change_count),
   };
-  const result = compose(subscores, WEIGHTS_V2, !!ref?.isReliable, "v2");
+  const result = compose(subscores, WEIGHTS_V2, "v2");
 
   const dealer = subscores.seller.dealer;
   result.dealer = dealer;
-  // A confidently-identified dealership is not a low-ranked opportunity, it is
-  // not an opportunity: there is no margin to negotiate and the approach is
-  // wasted. Weighted at 0.08 the seller subscore could never push one out of
-  // the ranking on its own, so the verdict cuts outside the weighted sum.
+  result.neutralised = cats.neutralised;
+
+  // Una automotora identificada con confianza no es una oportunidad mala: no es
+  // una oportunidad. No hay margen que negociar. Con peso 0.14 el subscore de
+  // vendedor no podría sacarla del ranking, así que el veredicto corta afuera
+  // de la suma ponderada.
   if (dealer.isDealer && (dealer.confidence === "high" || dealer.score >= DEALER_HIGH_CONFIDENCE)) {
     result.disqualified = true;
     result.disqualifiedBy = [`automotora/revendedor (${dealer.reasons.slice(0, 3).join(", ")})`];
     result.score = -1;
   }
-  if (flags.disqualified) {
-    // A financed listing advertises its down payment, so its price carries no
-    // information about the car. Force it out of the ranking rather than let a
-    // strong price subscore drag it back up.
+  // Un aviso financiado publica la entrega, no el precio del auto. El número
+  // que muestra no dice nada, así que tampoco sirve para que lo evalúes vos.
+  if (cats.disqualified) {
     result.disqualified = true;
     result.disqualifiedBy = [
       ...(result.disqualifiedBy ?? []),
-      ...flags.hits.filter((h) => h.disqualifies).map((h) => h.label),
+      ...cats.deuda.hits.filter((h) => h.disqualifies).map((h) => h.label),
     ];
     result.score = -1;
   }

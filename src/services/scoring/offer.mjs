@@ -1,193 +1,84 @@
 /**
- * Fase 6: offer amount and message draft.
+ * Fase 6: la cola de contacto.
  *
- * NOTHING here sends anything. Automated Messenger outreach is the fastest way
- * to lose the account, and a generic message converts badly, so this produces a
- * queue for manual review and manual sending.
+ * ACÁ NO SE MANDA NADA. La mensajería automatizada por Messenger es lo que más
+ * rápido dispara el baneo de cuenta, y un mensaje genérico convierte mal: esto
+ * produce una cola para revisión y envío manual.
  *
- * The offer is anchored to the market median, never to a fixed percentage off
- * the asking price: a car already listed 15% under market does not deserve a
- * further "-11% of asking" - that just burns the opportunity.
+ * Tampoco se sugiere un monto. Antes había un `suggestOffer` anclado a una
+ * mediana de mercado, pero esa mediana venía de MercadoLibre (que bloqueó la
+ * búsqueda) o del propio lote de Facebook (que se compara contra sí mismo), así
+ * que el número tenía menos fundamento del que aparentaba — y un número que
+ * aparenta fundamento es peor que ninguno, porque invita a usarlo sin pensar.
+ * El precio lo decidís vos; lo que la cola aporta son los datos para decidirlo:
+ * kilometraje, deuda declarada, antigüedad de la publicación y bajadas previas.
  */
-
 import { totalDebt } from "./debt.mjs";
-import { config } from "../../config.mjs";
-
-export const OFFER = {
-  desiredMarginPct: 0.18, // what we want to be under market when we buy
-  outlookBands: { high: 0.08, medium: 0.18 }, // gap from asking -> acceptance outlook
-  roundTo: 50,
-  // When the car is already priced at or below our target, the median anchor
-  // lands above the asking price and clamping produced an offer EQUAL to it -
-  // a draft reading "te pago 5990" for a car listed at 5990. That is not an
-  // offer, it is a no-op, and it was reaching the contact queue. A cash,
-  // same-day, self-collected purchase is worth at least this much of a
-  // discount, so the offer floor sits below asking rather than on it.
-  minCashDiscountPct: 0.03,
-  // Por encima de esta fracción de la oferta, la deuda deja de ser un ajuste de
-  // precio y pasa a ser el negocio: se marca para que una persona lo mire antes
-  // de mandar nada.
-  debtDominatesPct: 0.4,
-};
-
-const round = (v, step) => Math.round(v / step) * step;
-// Al netear una deuda se redondea SIEMPRE para abajo: redondear para arriba
-// devolvería parte de la deuda que acabamos de descontar.
-const roundDown = (v, step) => Math.floor(v / step) * step;
-
-/**
- * @param {object} listing  { price, currencyResolved, listedAt, priceChangeCount, oldPrice }
- * @param {object} reference { median, isReliable, sampleSize, currency }
- */
-export function suggestOffer(listing, reference) {
-  const asking = Number(listing.price);
-  if (!Number.isFinite(asking) || asking <= 0) {
-    return { ok: false, reason: "listing has no usable price" };
-  }
-  if (!reference?.median || !reference.isReliable) {
-    return {
-      ok: false,
-      reason: reference?.median
-        ? `market reference too thin (n=${reference.sampleSize}) to anchor an offer`
-        : "no market reference available",
-    };
-  }
-
-  const anchor = reference.median * (1 - OFFER.desiredMarginPct);
-  // Never offer above what they are already asking.
-  const raw = Math.min(anchor, asking);
-  // Round to a clean figure, then re-clamp: rounding 5 990 up to 6 000 would
-  // have us offering more than the seller is asking.
-  let offer = Math.min(round(raw, OFFER.roundTo), asking);
-  let anchoredTo = "market_median";
-
-  // The car is already at or below what the median says we should pay, so the
-  // clamp collapsed the offer onto the asking price. Fall back to the cash
-  // discount rather than emit a draft that offers exactly what is being asked.
-  if (offer >= asking) {
-    offer = Math.min(round(asking * (1 - OFFER.minCashDiscountPct), OFFER.roundTo), asking - 1);
-    anchoredTo = "asking_cash_discount";
-  }
-
-  // --- deuda declarada -------------------------------------------------
-  // Una deuda que el vendedor pone por escrito no es motivo para descartar la
-  // publicación: es plata que vamos a pagar nosotros, así que sale de la
-  // oferta. flags.mjs ya la penaliza en el ranking, que mide otra cosa (el
-  // riesgo); acá se resuelve el precio.
-  const currency = listing.currencyResolved ?? listing.currency_resolved ?? reference.currency ?? null;
-  const debt = totalDebt(
-    `${listing.title ?? ""}\n${listing.description ?? ""}`,
-    { currency, uyuPerUsd: config.fx.uyuPerUsd }
-  );
-  const offerBeforeDebt = offer;
-  if (debt.total > 0) offer = Math.max(0, roundDown(offer - debt.total, OFFER.roundTo));
-
-  if (offer <= 0) {
-    return {
-      ok: false,
-      reason: `la deuda declarada (${currency ?? ""} ${debt.total}) se come la oferta entera`,
-      debt,
-    };
-  }
-  const gapFromAsking = (asking - offer) / asking;
-  const underMarket = (reference.median - offer) / reference.median;
-
-  const outlook =
-    gapFromAsking <= OFFER.outlookBands.high ? "alta"
-    : gapFromAsking <= OFFER.outlookBands.medium ? "media"
-    : "baja";
-
-  return {
-    ok: true,
-    offer,
-    currency: listing.currencyResolved ?? listing.currency_resolved ?? reference.currency ?? null,
-    asking,
-    marketMedian: reference.median,
-    gapFromAskingPct: Number((gapFromAsking * 100).toFixed(1)),
-    underMarketPct: Number((underMarket * 100).toFixed(1)),
-    acceptanceOutlook: outlook,
-    anchoredTo,
-    referenceSampleSize: reference.sampleSize,
-    referenceSource: reference.source ?? null,
-
-    debt: {
-      deducted: Math.round((offerBeforeDebt - offer) * 100) / 100,
-      currency,
-      offerBeforeDebt,
-      items: debt.applied,
-      // Montos que NO se descontaron porque no se sabe en qué moneda están.
-      // Los tiene que mirar una persona antes de mandar la oferta.
-      needsReview: debt.unresolved,
-      dominates: debt.total > offerBeforeDebt * OFFER.debtDominatesPct,
-    },
-  };
-}
 
 const daysSince = (iso) => (iso ? Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000) : null);
 
 /**
- * A short, human message. Context earns a mention only when it is real: an
- * opening line about a listing being up "a while" is worse than no line at all
- * when it went up yesterday.
+ * Mensaje corto y humano, SIN monto: abre la conversación y deja el número
+ * para cuando hables vos.
+ *
+ * El contexto se menciona sólo cuando es real: una frase sobre que la
+ * publicación lleva tiempo es peor que ninguna frase cuando se publicó ayer.
  */
-export function draftMessage(listing, offerResult) {
-  if (!offerResult?.ok) return null;
-  // Facebook titles carry trailing whitespace ("2008 CITROEN PICASSO 2.0 "),
-  // which put a space before the full stop in the draft a human is about to send.
+export function draftMessage(listing) {
+  // Los títulos de Facebook vienen con espacio al final ("2008 CITROEN PICASSO
+  // 2.0 "), lo que dejaba un espacio antes del punto en algo que vas a mandar.
   const title = String(listing.title ?? "").trim() || "el vehículo";
   const days = daysSince(listing.listedAt ?? listing.listed_at);
   const drops = Number(listing.priceChangeCount ?? listing.price_change_count) || 0;
-  const cur = offerResult.currency ?? "";
-  const amount = offerResult.offer.toLocaleString("es-UY");
 
   const lines = [`Hola, buenas. Me interesa ${title}.`];
-
-  if (days != null && days >= 30) {
-    lines.push(`Vi que la publicación lleva un tiempo, así que no sé si sigue disponible.`);
-  } else {
-    lines.push(`¿Sigue disponible?`);
-  }
-
-  if (drops >= 2) {
-    lines.push(`Vi que ajustaste el precio más de una vez, así que te tiro una propuesta concreta.`);
-  }
-
-  // Si la oferta bajó por una deuda que el propio aviso declara, decirlo es la
-  // posición más fuerte que hay: el número deja de parecer arbitrario y queda
-  // claro que se leyó la publicación.
-  if (offerResult.debt?.deducted > 0) {
-    const d = offerResult.debt.deducted.toLocaleString("es-UY");
-    lines.push(`Vi que la publicación menciona una deuda de ${cur} ${d}, así que la oferta ya la contempla.`);
-  }
-
-  if (offerResult.anchoredTo === "asking_cash_discount") {
-    // The price is already fair. Pretending otherwise reads as a lowball and
-    // loses the car; the honest pitch here is speed and certainty, not price.
-    lines.push(
-      `El precio me parece razonable. Te ofrezco ${cur} ${amount} al contado, hoy mismo, y lo retiro yo.`,
-      `Si te sirve, coordinamos para verlo cuando puedas. Gracias.`
-    );
-  } else {
-    lines.push(
-      `Estoy en condiciones de pagarte ${cur} ${amount} al contado, hoy mismo, y lo retiro yo.`,
-      `Si te sirve, coordinamos para verlo cuando puedas. Gracias.`
-    );
-  }
-
+  lines.push(days != null && days >= 30
+    ? `Vi que la publicación lleva un tiempo, así que no sé si sigue disponible.`
+    : `¿Sigue disponible?`);
+  if (drops >= 2) lines.push(`Vi que ajustaste el precio más de una vez.`);
+  lines.push(`¿Se puede ver estos días? Pago al contado y lo retiro yo.`);
   return lines.join(" ");
 }
 
-/** Build the queue entry. Status starts pending: a human approves and sends. */
-export function buildContactEntry(listing, reference) {
-  const offer = suggestOffer(listing, reference);
-  if (!offer.ok) return { ok: false, reason: offer.reason, listingId: listing.id };
+/**
+ * La entrada de la cola: todo lo que hace falta para decidir, sin decidir nada.
+ *
+ * @param {object} listing  el aviso ya con detalle (km, año, descripción)
+ * @param {object} [context] { batchMedian, currency } sólo como referencia visual
+ */
+export function buildContactEntry(listing, context = {}) {
+  const price = listing.price == null ? null : Number(listing.price);
+  const currency = listing.currencyResolved ?? listing.currency_resolved ?? null;
+  const km = listing.mileageKm ?? listing.mileage_km ?? null;
+  const year = listing.vehicleYear ?? listing.vehicle_year ?? null;
+
+  // La deuda que el aviso declara: ya no se descuenta de ninguna oferta, pero
+  // es la mitad de lo que decide si vale la pena, así que va al frente.
+  const debt = totalDebt(`${listing.title ?? ""}\n${listing.description ?? ""}`, { currency });
+
   return {
     ok: true,
     listingId: listing.id,
-    suggestedOffer: offer.offer,
-    currency: offer.currency,
-    rationale: offer,
-    messageDraft: draftMessage(listing, offer),
     status: "pending",
+    messageDraft: draftMessage(listing),
+    // Todo esto es para que lo mires vos antes de mandar.
+    facts: {
+      price,
+      currency,
+      url: listing.url ?? null,
+      make: listing.make ?? null,
+      model: listing.model ?? null,
+      vehicleYear: year,
+      mileageKm: km,
+      kmPerYear: km && year ? Math.round(km / Math.max(1, new Date().getFullYear() - year)) : null,
+      listedAt: listing.listedAt ?? listing.listed_at ?? null,
+      daysListed: daysSince(listing.listedAt ?? listing.listed_at),
+      priceChangeCount: Number(listing.priceChangeCount ?? listing.price_change_count) || 0,
+      declaredDebt: debt.total > 0 ? { amount: debt.total, currency, items: debt.applied } : null,
+      // Montos que el aviso declara pero cuya moneda no está clara: no se
+      // suman a nada, los tenés que mirar vos.
+      debtNeedsReview: debt.unresolved,
+      batchMedian: context.batchMedian ?? null,
+    },
   };
 }

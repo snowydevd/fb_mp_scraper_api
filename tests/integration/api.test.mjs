@@ -45,8 +45,8 @@ before(async () => {
   await repo.saveScore({ listingId: "300000000000001", score: 0.42, version: "v2", breakdown: { price: { value: 0.7, weight: 0.38 } } });
   await repo.saveScore({ listingId: "300000000000002", score: 0.88, version: "v2", breakdown: { price: { value: 1, weight: 0.38 } } });
   await repo.enqueueContact({
-    listingId: "300000000000001", suggestedOffer: 6900, currency: "USD",
-    rationale: { asking: 7200, marketMedian: 8400, anchoredTo: "market_median" },
+    listingId: "300000000000001",
+    facts: { price: 7200, currency: "USD", mileageKm: 57_000, kmPerYear: 5_182, declaredDebt: null },
     messageDraft: "Hola, buenas. Me interesa Nissan March 2015.",
   });
 
@@ -122,7 +122,8 @@ test("the contact queue serves pending drafts", opts, async () => {
   assert.equal(status, 200);
   assert.equal(body.count, 1);
   assert.equal(body.items[0].status, "pending");
-  assert.equal(Number(body.items[0].suggested_offer), 6900);
+  assert.equal(body.items[0].facts.mileageKm, 57_000, "la cola trae los hechos, no un monto");
+  assert.equal(body.items[0].facts.declaredDebt, null);
   assert.match(body.items[0].message_draft, /Me interesa/);
 });
 

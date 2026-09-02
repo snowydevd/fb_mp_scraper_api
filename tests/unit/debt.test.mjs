@@ -1,10 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseDebtAmounts, totalDebt } from "../../src/services/scoring/debt.mjs";
-import { suggestOffer, draftMessage } from "../../src/services/scoring/offer.mjs";
+import { buildContactEntry } from "../../src/services/scoring/offer.mjs";
 
-const ref = { median: 7_495, isReliable: true, sampleSize: 14, currency: "USD" };
-const listing = (description) => ({ price: 6_500, currencyResolved: "USD", title: "Citroën Picasso", description });
+const listing = (description) => ({ id: "1", price: 6_500, currencyResolved: "USD", title: "Citroën Picasso", description });
 
 // --- parser ---------------------------------------------------------------
 
@@ -71,50 +70,16 @@ test("con tipo de cambio configurado sí, y deja el rate a la vista", () => {
   assert.equal(t.applied[0].convertedAmount, 375);
 });
 
-// --- oferta ---------------------------------------------------------------
-
-test("la deuda declarada sale de la oferta", () => {
-  const limpio = suggestOffer(listing("Impecable, único dueño."), ref);
-  const conDeuda = suggestOffer(listing("Impecable. Debe 200 dólares de patente."), ref);
-  assert.equal(limpio.offer, 6_150);
-  assert.equal(conDeuda.offer, 5_950);
-  assert.equal(conDeuda.debt.deducted, 200);
-  assert.equal(conDeuda.debt.offerBeforeDebt, 6_150);
+// --- de dónde se lee en el pipeline ---------------------------------------
+// El monto ya no se descuenta de una oferta —no hay oferta— pero sigue siendo
+// la mitad de lo que decide si el auto vale la pena, así que va en los hechos.
+test("el monto parseado llega a la entrada de la cola", () => {
+  const { facts } = buildContactEntry(listing("Tiene prenda, saldo 2000 usd."));
+  assert.equal(facts.declaredDebt.amount, 2_000);
+  assert.equal(facts.declaredDebt.currency, "USD");
 });
 
-test("el redondeo al netear va siempre para abajo", () => {
-  // 6150 - 175 = 5975; redondear a 6000 devolvería parte de la deuda.
-  const r = suggestOffer(listing("Debe 175 dólares de patente."), ref);
-  assert.ok(r.offer <= 5_975, `dio ${r.offer}`);
-});
-
-test("una deuda que se come la oferta entera no produce borrador", () => {
-  const r = suggestOffer(listing("Debo 8000 usd de prenda."), ref);
-  assert.equal(r.ok, false);
-  assert.match(r.reason, /se come la oferta/);
-});
-
-test("una deuda que domina el negocio se marca para revisión humana", () => {
-  const r = suggestOffer(listing("Tiene prenda, saldo 3000 usd."), ref);
-  assert.equal(r.ok, true);
-  assert.equal(r.debt.dominates, true, "una persona tiene que mirar esto antes de mandarlo");
-});
-
-test("lo que no se pudo descontar viaja con la oferta, no se pierde", () => {
-  const r = suggestOffer(listing("Deuda de patente 15.000 pesos."), ref);
-  assert.equal(r.offer, 6_150, "la oferta no se toca si no se sabe la moneda");
-  assert.equal(r.debt.needsReview.length, 1);
-  assert.equal(r.debt.needsReview[0].amount, 15_000);
-});
-
-test("el borrador dice de frente por qué la oferta bajó", () => {
-  const r = suggestOffer(listing("Impecable. Debe 200 dólares de patente."), ref);
-  const msg = draftMessage({ title: "Citroën Picasso 2008" }, r);
-  assert.match(msg, /deuda de USD 200/);
-  assert.match(msg, /5\.950/);
-});
-
-test("sin deuda, el borrador no habla de deuda", () => {
-  const r = suggestOffer(listing("Impecable, único dueño."), ref);
-  assert.ok(!draftMessage({ title: "x" }, r).includes("deuda"));
+test("un año en la descripción no se cuela como deuda en la cola", () => {
+  const { facts } = buildContactEntry(listing("Deuda de patente 2024 y 2025."));
+  assert.equal(facts.declaredDebt, null);
 });

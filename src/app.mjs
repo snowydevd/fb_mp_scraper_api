@@ -24,7 +24,6 @@ export function createApp() {
       uptimeSeconds: Math.round(process.uptime()),
       database: config.db.url ? "configured" : "absent",
       facebookSession: config.session.storageStatePath || config.session.cookies ? "configured" : "absent",
-      meli: config.meli.accessToken || config.meli.clientId ? "configured" : "absent",
     });
   });
 

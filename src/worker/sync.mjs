@@ -11,17 +11,26 @@ import { config } from "../config.mjs";
 import { searchVehicles } from "../services/marketplace/search.mjs";
 import { fetchListingDetail } from "../services/marketplace/detail.mjs";
 import { closeBrowser, listingsUsed, log, BudgetExceededError } from "../services/marketplace/browser.mjs";
-import { referenceFromInternal, referenceFromMeli } from "../services/reference/reference-price.mjs";
-import { createReferenceCache } from "../services/reference/cache.mjs";
-import { MeliUnavailableError, searchVehicles as searchMeliVehicles } from "../services/reference/meli.mjs";
-import { crossReference, YEAR_TOLERANCE } from "../services/reference/cross-reference.mjs";
+import { referenceFromInternal } from "../services/reference/reference-price.mjs";
 import { scoreV1, scoreV2 } from "../services/scoring/scorer.mjs";
 import { detectDealer, countBySellerInBatch } from "../services/scoring/dealer.mjs";
 import { partitionVehicles } from "../services/marketplace/vehicle-filter.mjs";
 import { buildContactEntry } from "../services/scoring/offer.mjs";
 
-/** Listings scoring at or above this get their detail page fetched (Fase 5). */
-export const DETAIL_THRESHOLD = Number(process.env.DETAIL_SCORE_THRESHOLD ?? 0.25);
+/**
+ * Piso para abrirle el detalle a un aviso (Fase 5).
+ *
+ * Era 0.25, calibrado contra una escala que ya no existe: el subscore de precio
+ * se llevaba el 42% del peso de v1 y al sacarlo los scores se desplomaron —en
+ * una corrida real el máximo fue 0.096—. Un umbral que nadie alcanza no filtra,
+ * deja el pipeline mudo.
+ *
+ * Ahora es 0 y el trabajo de limitar el gasto lo hace DETAIL_MAX_PER_RUN, que
+ * es quien lo hacía de verdad igual. El umbral sólo saca lo que tiene una
+ * bandera concreta en contra: sospecha de automotora, o un kilometraje que no
+ * es creíble. Ambos dan negativo.
+ */
+export const DETAIL_THRESHOLD = Number(process.env.DETAIL_SCORE_THRESHOLD ?? 0);
 export const DETAIL_MAX_PER_RUN = Number(process.env.DETAIL_MAX_PER_RUN ?? 5);
 
 /**
@@ -61,88 +70,21 @@ async function sellerCounts(items, repo) {
 }
 
 /**
- * Market reference for one listing. MercadoLibre first (cached by make/model/
- * year band, so a run makes one call per band rather than one per listing);
- * when its credentials are missing or rejected, fall back to the median of
- * comparable listings in this same batch.
+ * Mediana del lote, sólo como CONTEXTO para que una persona mire el precio.
  *
- * Dealer listings are excluded from that fallback. They are priced at retail
- * with margin baked in, and in the observed run four of the twenty-four
- * listings were the same dealership - so the "market median" that decided the
- * ranking was partly built from the very listings the pipeline exists to
- * exclude. The internal source stays self-referential either way (it says how a
- * car compares to the rest of Facebook, not to fair value), which is why it is
- * returned with source: "internal" and down-weighted by the scorer when thin.
+ * Ya no puntúa: el subscore de precio se fue junto con MercadoLibre. Se
+ * excluyen las automotoras porque publican a precio de agencia y arrastran la
+ * mediana para arriba, y el resultado igual es autorreferencial —dice cómo se
+ * compara un aviso contra el resto de Facebook, no contra valor de mercado—.
+ * Por eso viaja en `facts.batchMedian` y no en el score.
  */
-async function referenceFor(listing, batch, { cache, dealerIds }) {
-  const make = listing.make ?? null;
-  const model = listing.model ?? null;
-  const year = listing.vehicleYear ?? null;
+function medianaDelLote(listing, batch, dealerIds) {
   const currency = listing.currencyResolved ?? "USD";
-  const band = year ? { yearFrom: year - 2, yearTo: year + 2 } : { yearFrom: 1980, yearTo: 2100 };
-
-  if (make && model) {
-    try {
-      const ref = await cache.lookup({ make, model, ...band, currency }, () =>
-        referenceFromMeli({ make, model, ...band, currency })
-      );
-      if (ref?.median) return ref;
-    } catch (err) {
-      if (!(err instanceof MeliUnavailableError)) throw err;
-      // One failure is enough: retrying per listing would cost a token request
-      // each time when the credentials are simply wrong.
-      cache.markUpstreamUnavailable(err.message);
-      // fall through to internal
-    }
-  }
-
   const peers = batch.filter(
-    (b) =>
-      b.id !== listing.id &&
-      (b.currencyResolved ?? "USD") === currency &&
-      b.price != null &&
-      !dealerIds.has(b.id)
+    (b) => b.id !== listing.id && (b.currencyResolved ?? "USD") === currency && b.price != null && !dealerIds.has(b.id)
   );
-  const ref = referenceFromInternal({ make, model, ...band, currency }, peers.map((p) => ({
-    price: p.price,
-    currency_resolved: p.currencyResolved,
-  })));
-  ref.excludedDealerPeers = batch.length - 1 - peers.length;
-  return ref;
-}
-
-/**
- * Cruce contra MercadoLibre para un aviso puntual.
- *
- * Memoizado por marca/modelo/banda de años dentro de la corrida: varios avisos
- * del mismo Gol 2012 comparten una sola llamada. Y si MELI no está disponible,
- * esto NO puede voltear la corrida: el cruce es información extra sobre un
- * borrador, no un requisito para producirlo.
- */
-async function crossReferenceAgainstMeli(listing, memo, cache) {
-  const make = listing.make ?? null;
-  const model = listing.model ?? null;
-  if (!make || !model) return null;
-  if (cache.upstreamUnavailable) return null;
-
-  const year = listing.vehicleYear ?? null;
-  const key = [make, model, year ?? "?"].join("|").toLowerCase();
-  if (!memo.has(key)) {
-    try {
-      const { items } = await searchMeliVehicles({
-        make, model,
-        minYear: year ? year - YEAR_TOLERANCE : undefined,
-        maxYear: year ? year + YEAR_TOLERANCE : undefined,
-        limit: 50,
-      });
-      memo.set(key, items);
-    } catch (err) {
-      if (!(err instanceof MeliUnavailableError)) throw err;
-      cache.markUpstreamUnavailable(err.message);
-      return null;
-    }
-  }
-  return crossReference(listing, memo.get(key));
+  const ref = referenceFromInternal({ currency }, peers.map((p) => ({ price: p.price, currency_resolved: p.currencyResolved })));
+  return ref.median == null ? null : { value: Math.round(ref.median), currency, sampleSize: ref.sampleSize };
 }
 
 export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}) {
@@ -182,8 +124,6 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
     log("info", `persisted: +${stats.inserted} new, ${stats.updated} updated, ${stats.priceChanges} price changes, ${deactivated} deactivated`);
   }
 
-  const cache = createReferenceCache({ repo, log });
-  const meliMemo = new Map();
   const counts = await sellerCounts(items, repo);
 
   // --- grid-level dealer pass -------------------------------------------
@@ -208,13 +148,11 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
   // --- Fase 4: score everything from grid data alone --------------------
   const scored = [];
   for (const it of items) {
-    const reference = await referenceFor(it, items, { cache, dealerIds });
-    const result = scoreV1(it, reference);
-    scored.push({ listing: it, reference, ...result });
+    const result = scoreV1(it);
+    scored.push({ listing: it, ...result });
     if (repo) await repo.saveScore({ listingId: it.id, score: result.score, version: "v1", breakdown: result.breakdown });
   }
   scored.sort((a, b) => b.score - a.score);
-  log("info", `reference cache: ${cache.stats.misses} lookups, ${cache.stats.memoHits} memo hits, ${cache.stats.dbHits} db hits, ${cache.stats.stored} stored`);
 
   // --- Fase 5: detail only for what cleared the threshold ---------------
   //
@@ -268,8 +206,7 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
         sellerActiveCount:
           (detail.sellerId ? counts.get(detail.sellerId) : null) ?? cand.listing.sellerActiveCount ?? null,
       };
-      const reference = await referenceFor(merged, items, { cache, dealerIds });
-      const v2 = scoreV2(merged, reference);
+      const v2 = scoreV2(merged);
       cand.detail = merged;
       cand.v2 = v2;
 
@@ -304,28 +241,10 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
         rejected.push({ id: merged.id, title: merged.title, reason: `automotora (${dealer.confidence}): ${dealer.reasons.join(", ")}` });
         log("info", `skipping contact draft for ${merged.id}: dealer verdict ${dealer.confidence} (${dealer.reasons.join(", ")})`);
       } else {
-        // Cruce contra MercadoLibre: qué vale el mismo auto en el mercado
-        // formal, y cuántos hay más baratos allá. Si hay seis más baratos en
-        // MercadoLibre, el "chollo" de Facebook no lo es.
-        const cruce = await crossReferenceAgainstMeli(merged, meliMemo, cache);
-        if (cruce?.reliable) {
-          log("info", `${merged.id}: ${cruce.verdict} (${cruce.deltaPct}% vs mediana ${Math.round(cruce.median)} ${cruce.currency}, ` +
-            `${cruce.matched} comparables, ${cruce.cheaperOnMeli} más baratos allá)`);
-        }
-        cand.crossReference = cruce;
-
-        const entry = buildContactEntry({ ...merged, priceChangeCount: cand.listing.priceChangeCount }, reference);
-        if (entry.ok && cruce) entry.rationale.meliCrossReference = cruce;
-        const debt = entry.rationale?.debt;
-        if (debt?.deducted > 0) {
-          log("info", `${merged.id}: deuda declarada de ${debt.currency} ${debt.deducted} descontada de la oferta`);
-        }
-        if (debt?.needsReview?.length) {
-          // No se descontó porque no se sabe la moneda. Tiene que verlo una
-          // persona ANTES de mandar la oferta, no después.
-          log("error", `${merged.id}: hay deuda declarada SIN descontar (revisar a mano): ` +
-            debt.needsReview.map((d) => `${d.amount} — ${d.reason}`).join("; "));
-        }
+        const entry = buildContactEntry(
+          { ...merged, priceChangeCount: cand.listing.priceChangeCount },
+          { batchMedian: medianaDelLote(merged, items, dealerIds) }
+        );
         if (entry.ok) {
           queue.push(entry);
           if (repo) {
@@ -358,7 +277,6 @@ export async function runSync({ dryRun = false, filters = DEFAULT_FILTERS } = {}
     detailFetched: candidates.length,
     queued: queue.length,
     rejected: rejected.length,
-    referenceCache: cache.stats,
     listingsUsed: listingsUsed(),
     elapsedMs: Date.now() - started,
   };
@@ -391,27 +309,17 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       if (queue.length) {
         console.log("\n=== COLA DE CONTACTO (borradores, NO enviados) ===");
         for (const q of queue) {
-          console.log(`\n${q.listingId} | oferta ${q.currency} ${q.suggestedOffer} (pide ${q.rationale.asking}, ` +
-            `mediana ${Math.round(q.rationale.marketMedian)}, expectativa ${q.rationale.acceptanceOutlook}, ` +
-            `anclado a ${q.rationale.anchoredTo})`);
-          const d = q.rationale.debt;
-          if (d?.deducted > 0) {
-            console.log(`  deuda: -${d.currency} ${d.deducted} (la oferta antes de la deuda era ${d.offerBeforeDebt})` +
-              (d.dominates ? "  ** la deuda domina el negocio, mirala bien **" : ""));
-          }
-          if (d?.needsReview?.length) {
-            console.log(`  ** REVISAR A MANO: deuda declarada sin descontar -> ` +
-              d.needsReview.map((x) => `${x.amount} (${x.reason})`).join("; ") + " **");
-          }
-          const cr = q.rationale.meliCrossReference;
-          if (cr?.reliable) {
-            console.log(`  MercadoLibre: ${cr.verdict} — ${cr.deltaPct}% vs mediana ${Math.round(cr.median)} ${cr.currency} ` +
-              `(${cr.matched} comparables, ${cr.cheaperOnMeli} más baratos allá)`);
-            for (const c of cr.comparables.slice(0, 3)) {
-              console.log(`      ${String(c.price).padStart(6)} ${c.currency} ${c.vehicleYear ?? ""} ${c.url}`);
-            }
-          } else if (cr) {
-            console.log(`  MercadoLibre: sin cruce confiable (${cr.reason})`);
+          const f = q.facts;
+          console.log(`\n${q.listingId} | ${f.make ?? ""} ${f.model ?? ""} ${f.vehicleYear ?? ""}`.trimEnd());
+          console.log(`  pide   ${f.currency} ${f.price}` + (f.batchMedian ? `   (mediana del lote ${f.batchMedian.value}, n=${f.batchMedian.sampleSize})` : ""));
+          console.log(`  km     ${f.mileageKm ? f.mileageKm.toLocaleString("es-UY") : "desconocido"}` +
+            (f.kmPerYear ? `  (${f.kmPerYear.toLocaleString("es-UY")}/año)` : ""));
+          console.log(`  deuda  ${f.declaredDebt ? `${f.declaredDebt.currency} ${f.declaredDebt.amount}` : "ninguna declarada"}`);
+          if (f.daysListed != null) console.log(`  publicado hace ${f.daysListed} días${f.priceChangeCount ? `, ${f.priceChangeCount} bajadas` : ""}`);
+          console.log(`  ${f.url}`);
+          if (q.facts.debtNeedsReview?.length) {
+            console.log(`  ** REVISAR: deuda declarada sin moneda clara -> ` +
+              q.facts.debtNeedsReview.map((x) => `${x.amount} (${x.reason})`).join("; ") + " **");
           }
           console.log(`  "${q.messageDraft}"`);
         }

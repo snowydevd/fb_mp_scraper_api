@@ -205,18 +205,15 @@ export async function updateDetail(listingId, detail) {
  */
 export async function enqueueContact(entry) {
   const res = await getPool().query(
-    `INSERT INTO contact_queue (listing_id, suggested_offer, currency, rationale, message_draft, status)
-     VALUES ($1,$2,$3,$4,$5,'pending')
+    `INSERT INTO contact_queue (listing_id, facts, message_draft, status)
+     VALUES ($1,$2,$3,'pending')
      ON CONFLICT (listing_id) DO UPDATE SET
-       suggested_offer = EXCLUDED.suggested_offer,
-       currency        = EXCLUDED.currency,
-       rationale       = EXCLUDED.rationale,
-       message_draft   = EXCLUDED.message_draft,
-       updated_at      = now()
+       facts         = EXCLUDED.facts,
+       message_draft = EXCLUDED.message_draft,
+       updated_at    = now()
      WHERE contact_queue.status = 'pending'
      RETURNING id, (xmax = 0) AS is_insert`,
-    [entry.listingId, entry.suggestedOffer, entry.currency ?? "USD",
-     JSON.stringify(entry.rationale ?? {}), entry.messageDraft ?? ""]
+    [entry.listingId, JSON.stringify(entry.facts ?? {}), entry.messageDraft ?? ""]
   );
   // No row back means the conflict target existed but the WHERE blocked the
   // update: a human already approved, discarded or sent it. Leave it alone.
@@ -228,8 +225,7 @@ export const CONTACT_STATUSES = ["pending", "approved", "discarded", "sent"];
 
 export async function listContactQueue({ status = "pending", limit = 50 } = {}) {
   const res = await getPool().query(
-    `SELECT q.id, q.listing_id, q.suggested_offer, q.currency, q.rationale,
-            q.message_draft, q.status, q.created_at, q.updated_at,
+    `SELECT q.id, q.listing_id, q.facts, q.message_draft, q.status, q.created_at, q.updated_at,
             l.title, l.price, l.currency_resolved, l.url, l.city,
             l.make, l.model, l.vehicle_year, l.mileage_km, l.is_dealer
        FROM contact_queue q
@@ -254,45 +250,16 @@ export async function setContactStatus(id, status) {
   return res.rows[0] ?? null;
 }
 
-// --- reference prices ----------------------------------------------------
-
-export async function getFreshReference({ make, model, yearFrom, yearTo, currency, source }) {
-  const res = await getPool().query(
-    `SELECT * FROM reference_prices
-      WHERE make=$1 AND model=$2 AND year_from=$3 AND year_to=$4 AND currency=$5 AND source=$6
-        AND expires_at > now()`,
-    [make, model, yearFrom, yearTo, currency, source]
-  );
-  return res.rows[0] ?? null;
-}
-
-export async function saveReference(ref) {
-  const res = await getPool().query(
-    `INSERT INTO reference_prices
-       (make, model, year_from, year_to, currency, median_price, p10_price, p90_price,
-        sample_size, source, is_reliable, expires_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-     ON CONFLICT (make, model, year_from, year_to, currency, source) DO UPDATE SET
-       median_price=EXCLUDED.median_price, p10_price=EXCLUDED.p10_price,
-       p90_price=EXCLUDED.p90_price, sample_size=EXCLUDED.sample_size,
-       is_reliable=EXCLUDED.is_reliable, computed_at=now(), expires_at=EXCLUDED.expires_at
-     RETURNING *`,
-    [ref.make, ref.model, ref.yearFrom, ref.yearTo, ref.currency, ref.median,
-     ref.p10, ref.p90, ref.sampleSize, ref.source, ref.isReliable, ref.expiresAt]
-  );
-  return res.rows[0];
-}
-
 // --- scoring / reads -----------------------------------------------------
 
-export async function saveScore({ listingId, score, version, breakdown, referenceId = null }) {
+export async function saveScore({ listingId, score, version, breakdown }) {
   await getPool().query(
-    `INSERT INTO listing_scores (listing_id, score, version, breakdown, reference_id)
-     VALUES ($1,$2,$3,$4,$5)
+    `INSERT INTO listing_scores (listing_id, score, version, breakdown)
+     VALUES ($1,$2,$3,$4)
      ON CONFLICT (listing_id) DO UPDATE SET
        score=EXCLUDED.score, version=EXCLUDED.version, breakdown=EXCLUDED.breakdown,
-       reference_id=EXCLUDED.reference_id, scored_at=now()`,
-    [listingId, score, version, JSON.stringify(breakdown), referenceId]
+       scored_at=now()`,
+    [listingId, score, version, JSON.stringify(breakdown)]
   );
 }
 
@@ -326,7 +293,7 @@ export async function rankedOpportunities({ limit = 50, minScore = null, include
             l.seller_type, l.is_dealer, l.dealer_score, l.dealer_reasons,
             l.detail_fetched_at, l.first_seen_at,
             s.score, s.version, s.breakdown, s.scored_at,
-            q.status AS contact_status, q.suggested_offer
+            q.status AS contact_status
        FROM listing_scores s
        JOIN listings l ON l.id = s.listing_id
        LEFT JOIN contact_queue q ON q.listing_id = l.id

@@ -38,14 +38,6 @@ export const config = {
     persistStatePath: process.env.FB_STORAGE_STATE_OUT || process.env.FB_STORAGE_STATE || null,
   },
 
-  meli: {
-    accessToken: process.env.MELI_ACCESS_TOKEN || null,
-    clientId: process.env.MELI_CLIENT_ID || null,
-    clientSecret: process.env.MELI_CLIENT_SECRET || null,
-    siteId: process.env.MELI_SITE_ID || "MLU",
-    carsCategory: process.env.MELI_CARS_CATEGORY || "MLU1744",
-    cacheTtlHours: int("MELI_CACHE_TTL_HOURS", 72),
-  },
 
   // Tipo de cambio, sólo para netear una deuda declarada en una moneda contra
   // una oferta en la otra. Sin esto configurado no se convierte NADA: inventar

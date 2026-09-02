@@ -35,51 +35,51 @@ const CANCELLED_AFTER =
 
 export const FLAG_TERMS = [
   // Legal / financial encumbrance - the deal-killers
-  { re: /\bdeuda[s]?\b/, weight: -0.35, label: "deuda" },
-  { re: /\bdebe\b/, weight: -0.30, label: "debe" },
-  { re: /\bprenda(?:d[oa])?\b/, weight: -0.40, label: "prenda" },
-  { re: /\bgravamen\b/, weight: -0.40, label: "gravamen" },
-  { re: /\bembargo\b/, weight: -0.45, label: "embargo" },
-  { re: /\bsaldo\b/, weight: -0.25, label: "saldo" },
-  { re: /\bmultas?\b/, weight: -0.15, label: "multas" },
+  { re: /\bdeuda[s]?\b/, weight: -0.35, label: "deuda", cat: "deuda" },
+  { re: /\bdebe\b/, weight: -0.30, label: "debe", cat: "deuda" },
+  { re: /\bprenda(?:d[oa])?\b/, weight: -0.40, label: "prenda", cat: "deuda" },
+  { re: /\bgravamen\b/, weight: -0.40, label: "gravamen", cat: "deuda" },
+  { re: /\bembargo\b/, weight: -0.45, label: "embargo", cat: "deuda" },
+  { re: /\bsaldo\b/, weight: -0.25, label: "saldo", cat: "deuda" },
+  { re: /\bmultas?\b/, weight: -0.15, label: "multas", cat: "deuda" },
   // Una deuda de patente es chica, conocida y se descuenta del precio: no es
   // lo mismo que una prenda, que bloquea la transferencia hasta cancelarla.
-  { re: /\bdeuda\s+(?:de\s+)?(?:patente|rodados|empadronamiento)\b/, weight: -0.15, label: "deuda de patente", supersedes: "deuda" },
+  { re: /\bdeuda\s+(?:de\s+)?(?:patente|rodados|empadronamiento)\b/, weight: -0.15, label: "deuda de patente", supersedes: "deuda", cat: "deuda" },
   // financiado / financiacion / financiamos / financia: all of them mean the
   // advertised number may not be the sale price.
-  { re: /\bfinanci\w*/, weight: -0.25, label: "financiación" },
-  { re: /\bcuotas?\b/, weight: -0.20, label: "cuotas" },
+  { re: /\bfinanci\w*/, weight: -0.25, label: "financiación", cat: "deuda" },
+  { re: /\bcuotas?\b/, weight: -0.20, label: "cuotas", cat: "deuda" },
   // Financed listings advertise the DOWN PAYMENT as the price. Observed live:
   // a 2017 EcoSport listed at "USD 5000" whose description read "Financiación
   // de la casa U$S 5000 y cuotas" - the car costs far more. These rank top of
   // any price-based ranking and are never real opportunities, so they are
   // disqualified outright rather than merely penalised.
-  { re: /\bfinanciacion de la casa\b/, weight: -1, label: "financiación de la casa", disqualifies: true },
-  { re: /\bentrega\s+(?:de\s+)?(?:u\$s|usd|\$)?\s*[\d.,]+/, weight: -1, label: "entrega + cuotas", disqualifies: true },
-  { re: /\banticipo\b/, weight: -0.6, label: "anticipo", disqualifies: true },
+  { re: /\bfinanciacion de la casa\b/, weight: -1, label: "financiación de la casa", disqualifies: true, cat: "deuda" },
+  { re: /\bentrega\s+(?:de\s+)?(?:u\$s|usd|\$)?\s*[\d.,]+/, weight: -1, label: "entrega + cuotas", disqualifies: true, cat: "deuda" },
+  { re: /\banticipo\b/, weight: -0.6, label: "anticipo", disqualifies: true, cat: "deuda" },
 
   // Condition / paperwork
-  { re: /\bchocad[oa]\b/, weight: -0.45, label: "chocado" },
-  { re: /\bpara repuestos?\b/, weight: -0.50, label: "para repuestos" },
-  { re: /\bno anda\b/, weight: -0.50, label: "no anda" },
-  { re: /\bmotor fundido\b/, weight: -0.50, label: "motor fundido" },
-  { re: /\bsin empadronar\b/, weight: -0.35, label: "sin empadronar" },
-  { re: /\ba nombre de\b/, weight: -0.30, label: "a nombre de" },
+  { re: /\bchocad[oa]\b/, weight: -0.45, label: "chocado", cat: "condicion" },
+  { re: /\bpara repuestos?\b/, weight: -0.50, label: "para repuestos", cat: "condicion" },
+  { re: /\bno anda\b/, weight: -0.50, label: "no anda", cat: "condicion" },
+  { re: /\bmotor fundido\b/, weight: -0.50, label: "motor fundido", cat: "condicion" },
+  { re: /\bsin empadronar\b/, weight: -0.35, label: "sin empadronar", cat: "condicion" },
+  { re: /\ba nombre de\b/, weight: -0.30, label: "a nombre de", cat: "condicion" },
 
   // Mild
-  { re: /\bpermut\w*/, weight: -0.08, label: "permuto" },
-  { re: /\bescucho ofertas\b/, weight: -0.05, label: "escucho ofertas" },
+  { re: /\bpermut\w*/, weight: -0.08, label: "permuto", cat: "condicion" },
+  { re: /\bescucho ofertas\b/, weight: -0.05, label: "escucho ofertas", cat: "condicion" },
 
   // Positives
-  { re: /\bunico dueno\b/, weight: +0.15, label: "único dueño" },
-  { re: /\bpapeles al dia\b/, weight: +0.12, label: "papeles al día" },
-  { re: /\blibre de deuda[s]?\b/, weight: +0.20, label: "libre de deuda" },
-  { re: /\bsin deuda[s]?\b/, weight: +0.18, label: "sin deuda" },
-  { re: /\bno (?:debe|adeuda)(?: nada)?\b/, weight: +0.18, label: "no debe nada" },
-  { re: /\bsin prenda[s]?\b|\blibre de prenda[s]?\b/, weight: +0.15, label: "sin prenda" },
-  { re: /\bal dia (?:con|de) (?:la )?(?:patente|todo)\b|\bpatente al dia\b/, weight: +0.12, label: "patente al día" },
+  { re: /\bunico dueno\b/, weight: +0.15, label: "único dueño", cat: "condicion" },
+  { re: /\bpapeles al dia\b/, weight: +0.12, label: "papeles al día", cat: "condicion" },
+  { re: /\blibre de deuda[s]?\b/, weight: +0.20, label: "libre de deuda", cat: "deuda" },
+  { re: /\bsin deuda[s]?\b/, weight: +0.18, label: "sin deuda", cat: "deuda" },
+  { re: /\bno (?:debe|adeuda)(?: nada)?\b/, weight: +0.18, label: "no debe nada", cat: "deuda" },
+  { re: /\bsin prenda[s]?\b|\blibre de prenda[s]?\b/, weight: +0.15, label: "sin prenda", cat: "deuda" },
+  { re: /\bal dia (?:con|de) (?:la )?(?:patente|todo)\b|\bpatente al dia\b/, weight: +0.12, label: "patente al día", cat: "deuda" },
   // Una prenda ya levantada no es un gravamen, es un trámite terminado.
-  { re: /\bprenda (?:cancelada|levantada|saldada|liberada)\b/, weight: +0.10, label: "prenda cancelada" },
+  { re: /\bprenda (?:cancelada|levantada|saldada|liberada)\b/, weight: +0.10, label: "prenda cancelada", cat: "deuda" },
 ];
 
 /**
@@ -138,3 +138,28 @@ export function evaluateFlags(text) {
     neutralised,
   };
 }
+
+/**
+ * El mismo cálculo, partido en las dos cosas que el ranking prioriza.
+ *
+ * `evaluateFlags` mezcla deuda con estado del auto porque históricamente era un
+ * solo subscore. El ranking ahora pregunta dos cosas distintas —"¿cuánto debe?"
+ * y "¿en qué estado está?"— y un desglose que no las separa no puede explicar
+ * por qué un auto quedó abajo.
+ */
+export function evaluateByCategory(text) {
+  const r = evaluateFlags(text);
+  const suma = (cat) => r.hits
+    .filter((h) => h.counted !== false && termCat(h.label) === cat)
+    .reduce((a, h) => a + h.weight, 0);
+  const clamp = (v) => Math.max(-1, Math.min(1, v));
+  return {
+    deuda: { score: clamp(suma("deuda")), hits: r.hits.filter((h) => termCat(h.label) === "deuda") },
+    condicion: { score: clamp(suma("condicion")), hits: r.hits.filter((h) => termCat(h.label) === "condicion") },
+    disqualified: r.disqualified,
+    neutralised: r.neutralised,
+  };
+}
+
+const CAT_POR_LABEL = new Map(FLAG_TERMS.map((t) => [t.label, t.cat ?? "condicion"]));
+const termCat = (label) => CAT_POR_LABEL.get(label) ?? "condicion";

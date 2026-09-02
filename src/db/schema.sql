@@ -96,43 +96,27 @@ CREATE TABLE IF NOT EXISTS raw_snapshots (
 );
 CREATE INDEX IF NOT EXISTS raw_snapshots_run_idx ON raw_snapshots (run_id, captured_at DESC);
 
--- Market reference prices, cached per make/model/year band (Fase 3).
-CREATE TABLE IF NOT EXISTS reference_prices (
-  id             BIGSERIAL PRIMARY KEY,
-  make           TEXT NOT NULL,
-  model          TEXT NOT NULL,
-  year_from      INTEGER NOT NULL,
-  year_to        INTEGER NOT NULL,
-  currency       TEXT NOT NULL,
-  median_price   NUMERIC(14,2) NOT NULL,
-  p10_price      NUMERIC(14,2),
-  p90_price      NUMERIC(14,2),
-  sample_size    INTEGER NOT NULL,
-  source         TEXT NOT NULL,                      -- meli | internal
-  is_reliable    BOOLEAN NOT NULL,                   -- false when sample_size < 5
-  computed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at     TIMESTAMPTZ NOT NULL,
-  UNIQUE (make, model, year_from, year_to, currency, source)
-);
-
 -- Scores, kept with their full breakdown so any ranking can be explained.
 CREATE TABLE IF NOT EXISTS listing_scores (
   listing_id   TEXT PRIMARY KEY REFERENCES listings(id) ON DELETE CASCADE,
   score        NUMERIC(6,4) NOT NULL,
   version      TEXT NOT NULL,                        -- v1 | v2
   breakdown    JSONB NOT NULL,                       -- every subscore + weight
-  reference_id BIGINT REFERENCES reference_prices(id),
   scored_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS listing_scores_rank_idx ON listing_scores (score DESC);
+
+-- El subscore de precio se eliminó junto con MercadoLibre, que bloqueó
+-- /sites/{site}/search. reference_prices nunca llegó a llenarse, así que se
+-- descarta sin pérdida; listing_scores.reference_id apuntaba ahí.
+DROP TABLE IF EXISTS reference_prices CASCADE;
+ALTER TABLE listing_scores DROP COLUMN IF EXISTS reference_id;
 
 -- Fase 6: contact queue. Drafts only - nothing here is ever sent automatically.
 CREATE TABLE IF NOT EXISTS contact_queue (
   id             BIGSERIAL PRIMARY KEY,
   listing_id     TEXT NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
-  suggested_offer NUMERIC(14,2) NOT NULL,
-  currency       TEXT NOT NULL,
-  rationale      JSONB NOT NULL,
+  facts          JSONB NOT NULL,                     -- km, deuda, antigüedad, precio pedido
   message_draft  TEXT NOT NULL,
   status         TEXT NOT NULL DEFAULT 'pending',    -- pending | approved | discarded | sent
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -140,6 +124,30 @@ CREATE TABLE IF NOT EXISTS contact_queue (
   UNIQUE (listing_id)
 );
 ALTER TABLE contact_queue ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+-- La cola dejó de sugerir un monto: la mediana que lo anclaba venía de
+-- MercadoLibre o del propio lote de Facebook, así que el número tenía menos
+-- fundamento del que aparentaba, y un número que aparenta fundamento invita a
+-- usarlo sin pensar. Ahora la cola trae los HECHOS (km, deuda, antigüedad) y el
+-- precio lo decide una persona. Las columnas viejas quedan nullable en vez de
+-- borrarse, para no perder los borradores ya aprobados de corridas anteriores.
+ALTER TABLE contact_queue ADD COLUMN IF NOT EXISTS facts JSONB;
+
+-- Guardado por existencia de columna: en una base NUEVA la tabla ya se crea sin
+-- suggested_offer, y un ALTER sobre una columna inexistente aborta el migrate
+-- entero. No hay "ALTER COLUMN ... IF EXISTS".
+DO $$
+DECLARE c text;
+BEGIN
+  FOREACH c IN ARRAY ARRAY['suggested_offer', 'currency', 'rationale'] LOOP
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'contact_queue' AND column_name = c
+    ) THEN
+      EXECUTE format('ALTER TABLE contact_queue ALTER COLUMN %I DROP NOT NULL', c);
+    END IF;
+  END LOOP;
+END $$;
 CREATE INDEX IF NOT EXISTS contact_queue_status_idx ON contact_queue (status, created_at DESC);
 
 -- A human decides what gets sent; the worker must never overwrite that
@@ -170,7 +178,6 @@ ALTER TABLE listings         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE price_history    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sellers          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE raw_snapshots    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE reference_prices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE listing_scores   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contact_queue    ENABLE ROW LEVEL SECURITY;
 

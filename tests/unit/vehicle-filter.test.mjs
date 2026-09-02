@@ -121,3 +121,18 @@ test("el tope del salteo por grilla está en una fracción, no en un absoluto", 
     "una tanda entera marcada como automotora es un bug de detección, no un hecho del mercado");
   assert.ok(GRID_DEALER_SKIP_MAX_SHARE <= 0.6);
 });
+
+// --- el km de la grilla miente de una forma específica --------------------
+test("un kilometraje de grilla que ES el precio se descarta", async () => {
+  const { kilometrajePlausible } = await import("../../src/services/marketplace/extract.mjs");
+  // Medido en vivo: 4 de 6 kilometrajes de grilla eran el precio, y los cuatro
+  // eran avisos financiados que se llevaron el presupuesto de navegación entero.
+  assert.equal(kilometrajePlausible(5_000, 5_000), null);
+  assert.equal(kilometrajePlausible(7_000, 7_000), null);
+  // Un km real no coincide con el precio.
+  assert.equal(kilometrajePlausible(210_000, 6_500), 210_000);
+  assert.equal(kilometrajePlausible(131_000, 9_900), 131_000);
+  // Sin precio no se puede comparar; sin km no hay nada que descartar.
+  assert.equal(kilometrajePlausible(90_000, null), 90_000);
+  assert.equal(kilometrajePlausible(null, 5_000), null);
+});

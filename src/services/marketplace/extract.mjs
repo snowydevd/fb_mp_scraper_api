@@ -113,6 +113,24 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Un kilometraje de grilla que coincide con el precio no es un kilometraje.
+ *
+ * Los avisos financiados publican la entrega en el campo del odómetro, y en la
+ * grilla eso sale como "5.000 km" en un auto que pide USD 5.000. Sin
+ * descripción no hay con qué contrastarlo —el detalle sí puede, la grilla no— y
+ * el scorer lo lee como un auto impecable de 5.000 km. Medido en una corrida
+ * real: 4 de los 6 kilometrajes de grilla eran el precio, y los cuatro eran
+ * avisos financiados que se llevaron todo el presupuesto de navegación.
+ *
+ * La coincidencia exacta entre precio y "kilometraje" no pasa por azar.
+ */
+export function kilometrajePlausible(km, precio) {
+  if (km == null) return null;
+  if (precio != null && km === precio) return null;
+  return km;
+}
+
 /** Grid subtitles sometimes carry mileage ("90 mil km", "165 mil km"). */
 export function parseMileageHint(subtitles) {
   const text = (subtitles || []).map((s) => s?.subtitle || "").join(" ");
@@ -171,7 +189,7 @@ export function mapListing(node) {
     // title. They are not as good as the detail page's structured fields, but
     // they are what decides WHICH listings are worth opening at all, and
     // opening one costs a rate-limited navigation.
-    mileageHint: parseMileageHint(node.custom_sub_titles_with_rendering_flags),
+    mileageHint: kilometrajePlausible(parseMileageHint(node.custom_sub_titles_with_rendering_flags), amount),
     vehicleYearHint: parseYear(node.marketplace_listing_title ?? node.custom_title, null),
 
     isSold: node.is_sold ?? null,

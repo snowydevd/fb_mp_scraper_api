@@ -22,7 +22,7 @@ npm start                         # escucha en http://localhost:4000
 
 | Método  | Ruta                     | Qué hace                                              |
 | ------- | ------------------------ | ----------------------------------------------------- |
-| `GET`   | `/health`                | Estado y qué está configurado (base, sesión FB, MELI)  |
+| `GET`   | `/health`                | Estado y qué está configurado (base, sesión de Facebook) |
 | `GET`   | `/api/opportunities`     | Ranking puntuado desde la base (sin automotoras)       |
 | `GET`   | `/api/contact-queue`     | Borradores pendientes de aprobación humana             |
 | `PATCH` | `/api/contact-queue/:id` | `{ status }` — aprobar / descartar / marcar enviado    |
@@ -166,8 +166,9 @@ renovarla.
 | `WORKER_INTERVAL_HOURS`     | 6       | Cada cuánto corre el worker programado |
 | `WORKER_JITTER_PCT`         | 0.2     | Jitter aplicado al intervalo         |
 | `WORKER_ACTIVE_HOURS`       | 9-22    | Ventana horaria en que puede correr  |
-| `MELI_CACHE_TTL_HOURS`      | 72      | TTL del cache de precios de referencia |
-| `UYU_PER_USD`               | —       | Tipo de cambio para netear deuda en la otra moneda; sin esto no se convierte |
+| `UYU_PER_USD`               | —       | Tipo de cambio para sumar deuda en la otra moneda; sin esto no se convierte |
+| `DETAIL_SCORE_THRESHOLD`    | 0       | Piso de score para abrir el detalle |
+| `DETAIL_MAX_PER_RUN`        | 5       | Detalles máximos por corrida |
 
 ## Servidor MCP
 
@@ -178,9 +179,11 @@ oficial `@modelcontextprotocol/sdk` que expone tres tools:
   primero. Lee la base, **no scrapea**, así que llamarla es gratis. Cada fila
   trae el `breakdown` completo del score. Las automotoras se excluyen por
   defecto; `includeDealers: true` existe para auditar el filtro.
-- **`list_contact_queue`** — los borradores de oferta y mensaje pendientes de
-  revisión. Es de **solo lectura a propósito**: aprobar o descartar un borrador
-  es una decisión humana, y se hace por `PATCH /api/contact-queue/:id`.
+- **`list_contact_queue`** — los borradores pendientes de revisión, cada uno con
+  los hechos para juzgarlo: kilometraje, deuda declarada, días publicado. **No
+  trae monto sugerido**, el precio lo decidís vos. Es de solo lectura a
+  propósito: aprobar o descartar es una decisión humana, por
+  `PATCH /api/contact-queue/:id`.
 - **`search_marketplace`** — el camino viejo por texto libre: `query`
   (requerido), `location`, `minPrice`, `maxPrice`. Devuelve lo que matchee el
   texto, juguetes incluidos; para autos usá el pipeline. Los errores del
@@ -233,8 +236,8 @@ npm run worker:dry        # busca, puntúa y muestra el ranking SIN base de dato
 npm run migrate           # aplica el schema (necesita DATABASE_URL)
 npm run worker            # corrida completa con persistencia
 npm run worker:schedule   # worker programado (cada ~6h, con jitter y ventana horaria)
-npm test                  # 90 tests unitarios, sin tocar Facebook ni Postgres
-npm run test:integration  # 23 tests contra un Postgres real (ver abajo)
+npm test                  # 115 tests unitarios, sin tocar Facebook ni Postgres
+npm run test:integration  # 29 tests contra un Postgres real (ver abajo)
 ```
 
 Los tests de integración se saltean solos si no hay `TEST_DATABASE_URL`:
@@ -398,47 +401,48 @@ Del otro lado suman: `libre de deuda`, `sin deuda`, `no debe nada`,
 `sin prenda`, `patente al día`, `prenda cancelada`, `único dueño`,
 `papeles al día`.
 
-### La deuda sale del precio, no de la lista
+### El contexto anula el término
 
-Una deuda que el vendedor pone por escrito **no es motivo para descartar la
-publicación**: es plata que vamos a pagar nosotros, así que sale de la oferta.
-Son dos ejes distintos y los dos se usan — `flags.mjs` la penaliza en el
-**ranking**, donde mide riesgo; `debt.mjs` la descuenta del **precio**, que es
-donde el problema se resuelve.
+Sin esto el sistema penalizaba al vendedor por decir que el auto **no** debe
+nada: "sin deuda" daba -0.20 y "no debe nada" -0.30, o sea que la señal de
+vendedor honesto que más queremos era justo la que restaba. El caso más caro era
+**"sin embargo"**: la conjunción adversativa más común del español matcheaba
+`/\bembargo\b/` y valía -0.45, así que cualquier vendedor escribiendo prosa
+normal quedaba marcado como auto embargado.
 
-```
-Citroën Picasso, pide USD 6.500, mediana 7.495
-  sin deuda                        -> oferta 6.150
-  "Debe 200 dólares de patente"    -> oferta 5.950   (-200)
-  "prenda, saldo 2000 usd"         -> oferta 4.150   (-2000, marcado: la deuda domina)
-  "Debo 8000 usd de prenda"        -> sin borrador: la deuda se come la oferta
-```
+Anulan el término que viene después: `sin`, `no tiene/debe/adeuda`, `libre de`.
+Y apareciendo después: `cancelada`, `levantada`, `saldada`, `pagada`. La ventana
+es de 28 caracteres a propósito: con una grande, un "sin" de cualquier parte del
+aviso anularía una prenda mencionada tres oraciones más abajo.
 
-Y el borrador lo dice de frente, que es la posición más fuerte que hay — el
-número deja de parecer arbitrario y queda claro que se leyó la publicación:
+Lo anulado vuelve en `neutralised` en vez de desaparecer.
 
-> "Vi que la publicación menciona una deuda de USD 200, así que la oferta ya la
-> contempla."
+### Deuda: la mitad de la decisión
 
-**Dos reglas mandan sobre todo lo demás:**
+`deuda` es un subscore propio con el 30% del peso de v2, separado de `condicion`
+a propósito: "debe plata" y "está chocado" son preguntas distintas, y un
+desglose que las mezcla no explica por qué un auto quedó abajo.
 
-**Sin moneda segura, no se descuenta.** Esta plata entra en una oferta que una
-persona va a mandar. Restarle 15.000 pesos a un precio en dólares convierte una
-oferta de USD 6.150 en una de USD -8.850. Cuando la moneda no está declarada
-(un `$` pelado es ambiguo acá) o está en la otra moneda sin tipo de cambio
-configurado, el monto **no se toca** y viaja en `debt.needsReview` para que lo
-mire un humano. El worker lo loguea como error, no como info.
+Los términos se pesan distinto porque no son lo mismo: una **prenda** viva
+bloquea la transferencia hasta cancelarla, una **deuda de patente** es chica,
+conocida y se descuenta al negociar.
 
-Si querés que convierta, configurá `UYU_PER_USD`. Sin eso no se convierte nada:
-inventar un tipo de cambio para poder restar sería peor que no restar.
+| Término | Peso | | Término | Peso |
+| --- | ---: | --- | --- | ---: |
+| `embargo` | -0.45 | | `libre de deuda` | +0.20 |
+| `prenda` | -0.40 | | `sin deuda` | +0.18 |
+| `gravamen` | -0.40 | | `no debe nada` | +0.18 |
+| `deuda` | -0.35 | | `sin prenda` | +0.15 |
+| `debe` | -0.30 | | `patente al día` | +0.12 |
+| `saldo` | -0.25 | | `prenda cancelada` | +0.10 |
+| `deuda de patente` | -0.15 | | | |
+| `multas` | -0.15 | | | |
 
-**Un número no es un monto por estar cerca de la palabra "deuda".** "deuda de
-patente 2024 y 2025" son los AÑOS que se adeudan, no 2024 dólares. Un número de
-cuatro cifras en rango de año y sin símbolo de moneda se descarta — pero
-"deuda de u$s 2000" y "deuda de 2.024 pesos" sí son plata.
-
-El redondeo al netear va siempre para abajo: redondear 5.975 a 6.000 devolvería
-parte de la deuda que se acaba de descontar.
+`debt.mjs` además parsea el **monto**, que va a los hechos de la cola. Nunca se
+suma un monto cuya moneda no esté declarada: un `$` pelado es ambiguo en
+Uruguay, y una deuda en la otra moneda sin `UYU_PER_USD` configurado tampoco se
+convierte. Y un número cerca de la palabra "deuda" no es un monto: "deuda de
+patente **2024 y 2025**" son los años que se adeudan.
 
 ### La trampa de los financiados
 
@@ -453,175 +457,92 @@ corrida real, 3 de los 4 mejores candidatos por precio eran de este tipo.
 El kilometraje estructurado se contrasta contra la descripción: si difieren más
 de 3x, gana la descripción y queda registrado en `mileageConflict`.
 
-### Scoring trazable
+### Scoring: kilometraje y deuda
 
-Cada listing guarda su desglose completo: cada subscore con su peso y su
-contribución, de modo que el ranking siempre se puede explicar.
+El ranking contesta una sola pregunta: **¿a cuál de estos autos vale la pena
+escribirle?** No contesta si el precio es bueno — eso lo decidís vos, y la banda
+de precio ya se filtra del lado de Facebook al buscar, así que todo lo que llega
+está dentro del presupuesto.
 
-- **v1** (grilla): `price`, `priceDrop`, `staleness`, `priceChanges`, `km`, `seller`
-- **v2** (+ detalle): los mismos, más `flags`, y con los datos estructurados del
-  detalle en vez de las pistas de la grilla
+| Subscore     | v1 (grilla) | v2 (con detalle) | Qué mide |
+| ------------ | ----------: | ---------------: | -------- |
+| `km`         | 0.50 | 0.38 | kilometraje |
+| `deuda`      |    — | 0.30 | prenda, embargo, patente, multas |
+| `seller`     | 0.28 | 0.14 | automotora / revendedor |
+| `condicion`  |    — | 0.08 | chocado, para repuestos, único dueño |
+| `staleness`  | 0.15 | 0.06 | días publicado |
+| `priceDrop`  | 0.05 | 0.03 | bajó el precio |
+| `priceChanges` | 0.02 | 0.01 | cuántas veces lo bajó |
 
-v1 no es sólo un ranking: es lo que decide **a quién se le abre la publicación**,
-y abrir una cuesta una navegación con rate limit. Rankeando sólo por precio, las
-5 navegaciones de una corrida se fueron enteras a avisos que después se
-descartaban —el precio de una automotora se ve excelente justamente porque es la
-entrega de un plan—. Por eso v1 gasta parte de su peso en las dos señales que
-predicen una navegación desperdiciada: el vendedor y el km/año.
+**El precio no puntúa.** Antes se llevaba el 38–42% del peso, anclado a una
+mediana que venía de MercadoLibre o del propio lote de Facebook. MercadoLibre
+bloqueó `/sites/{site}/search` (403 con token de usuario válido y todo lo demás
+respondiendo), y la mediana del lote se compara contra sí misma. Un número que
+aparenta fundamento es peor que ninguno.
 
-Las pistas de la grilla (`mileageHint` del subtítulo, `vehicleYearHint` del
-título) son peores que los campos estructurados del detalle, pero son las que
-están disponibles antes de gastar la navegación.
+**El kilometraje se mide dos veces y manda la peor.** El km/año dice cómo se usó
+el auto; el km absoluto dice cuánta vida le queda, que es lo que se revende. Un
+2008 con 210.000 km hizo 11k/año —uso normal— y midiendo sólo km/año puntuaba
+igual que un 2015 con 57.000. Para comprar y revender no son ni parecidos.
 
-El veredicto de automotora en v1 es **gradual**, no binario: un título que dice
-"… NOAHCARS" da 0.5 contra un umbral de 0.6. No alcanza para afirmar que es una
-automotora, pero está lejos de ser nada, así que baja el score sin descalificar.
-La decisión firme se toma en v2, con la descripción a la vista.
+Un km implausiblemente bajo penaliza igual que uno alto, por dos motivos
+distintos: un tablero corregido es un riesgo, y —mucho más común— un usado de
+USD 5.000–12.000 con "5.000 km" no tiene 5.000 km.
 
-`staleness` usa el `creation_time` de Facebook, no `first_seen_at`: la
-antigüedad real está disponible desde la primera corrida.
+#### El km de la grilla miente de una forma específica
 
-Cuando la referencia de mercado tiene menos de 5 comparables, el peso del
-subscore de precio se recorta al 25% y se redistribuye, para que una referencia
-pobre no decida el ranking.
+Los avisos financiados publican **la entrega en el campo del odómetro**. En la
+grilla eso sale como "5.000 km" en un auto que pide USD 5.000, y sin descripción
+no hay con qué contrastarlo. Medido en una corrida real: **4 de los 6
+kilometrajes de la grilla eran el precio**, y los cuatro eran avisos financiados
+que se llevaron el presupuesto de navegación entero.
 
-### MercadoLibre: credenciales y cruce
+La coincidencia exacta entre precio y "kilometraje" no pasa por azar, así que se
+descarta. Es la misma mentira que `mapDetail` ya cruzaba contra la descripción;
+la grilla no tiene descripción, así que necesita su propia defensa.
 
-`GET /sites/MLU/search` **no es público**. Verificado hoy contra la API:
+#### El umbral de detalle
 
-```
-GET /categories/MLU1744  -> 200  "Autos y Camionetas", 22.773 publicaciones
-GET /sites/MLU/search    -> 403  forbidden
-GET /sites/MLU           -> 403  PA_UNAUTHORIZED_RESULT_FROM_POLICIES
-```
-
-El grant `client_credentials` **sigue vigente, aunque la documentación ya no lo
-mencione** — los docs de autenticación sólo describen `authorization_code`. Se
-verificó que MELI valida el grant ANTES que las credenciales, así que el error
-distingue los dos casos:
-
-```
-grant_type=banana              -> unsupported_grant_type: invalid grant_type: banana
-grant_type=client_credentials  -> invalid_client (pasó la validación de grant)
-```
-
-O sea que alcanza con crear una app: no hace falta el flujo de autorización de
-usuario, ni un redirect URI que funcione, ni refresh tokens.
-
-**Cómo obtenerlas:**
-
-1. **https://developers.mercadolibre.com.uy/devcenter/create-app** — con tu cuenta
-   de MercadoLibre. Ojo: `/devcenter` a secas es una landing, no el formulario;
-   las apps ya creadas están en `/devcenter/home`.
-2. Completar el formulario. Te da **App ID** (`client_id`) y **Secret Key**
-   (`client_secret`). El **URI de redirect** es obligatorio en el formulario pero
-   **no se usa acá**: el token se pide por `client_credentials`, sin paso por
-   browser, así que cualquier https válida sirve y no tiene que responder nada.
-3. Al `.env`:
-   ```
-   MELI_CLIENT_ID=<App ID>
-   MELI_CLIENT_SECRET=<Secret Key>
-   ```
-4. `npm run meli:check`
-
-Docs de autenticación:
-https://developers.mercadolibre.com.uy/es_ar/autenticacion-y-autorizacion
-
-**`npm run meli:check`** verifica la categoría, el token y una búsqueda real con
-los filtros del pipeline. Existe porque el resto degrada en silencio cuando MELI
-no está —cae a la referencia interna y sigue, que es lo correcto en una corrida
-pero pésimo cuando querés saber si quedó bien configurado.
-
-**`npm run compare`** hace la MISMA búsqueda con los MISMOS filtros en las dos
-fuentes y compara las medianas. Sirve para calibrar: si las dos dan medianas
-parecidas, la referencia interna no estaba tan mal.
-
-**El cruce por aviso** (`cross-reference.mjs`) es distinto de la mediana: además
-del número trae **cuáles** son los comparables, con su link, para poder abrirlos
-y ver si la comparación tiene sentido. Un ranking que dice "18% bajo mercado"
-sin poder mostrar contra qué no se puede auditar. Y trae la pregunta práctica:
-`cheaperOnMeli`, cuántos comparables están **más baratos** en MercadoLibre — si
-hay seis, el chollo de Facebook no lo es.
-
-Dos números que no hay que confundir: `matched` son los comparables encontrados
-(ya pasaron marca, modelo, año y moneda) y decide la confiabilidad; `sampleSize`
-son los que sobreviven al recorte p10–p90 que protege a la mediana de las
-publicaciones fantasma. Juzgar la confiabilidad sobre el recorte hacía falta ~8
-comparables para que alguna vez dijera que sí.
-
-Como en todo el resto, **nunca se convierte moneda**: un comparable en UYU no
-compara contra un aviso en USD, se descarta y se informa cuántos.
-
-> El mapeo y el cruce están cubiertos por tests contra fixtures. El round-trip
-> HTTP de la búsqueda **queda sin verificar** hasta que haya credenciales: la
-> forma de los parámetros y de la respuesta sale de la documentación, no de una
-> respuesta real. `npm run meli:check` es lo primero que lo va a ejercitar.
-
-### Precio de referencia
-
-`GET /sites/MLU/search` de MercadoLibre **ya no es público** (403
-`PA_UNAUTHORIZED_RESULT_FROM_POLICIES`). Configurá `MELI_CLIENT_ID` +
-`MELI_CLIENT_SECRET`, o `MELI_ACCESS_TOKEN`. Sin credenciales, la referencia cae
-a la mediana de nuestros propios listings comparables, marcada como
-`source: "internal"` — dice cómo se compara un auto contra el resto de Facebook,
-no contra valor de mercado.
-
-En ambos casos se descartan outliers fuera del rango p10–p90 antes de la
-mediana: en una sola página de Facebook aparecieron precios de 1, 111111 y
-1000000.
-
-El resultado de MercadoLibre se cachea por combinación marca/modelo/banda de
-años en `reference_prices`, con TTL de `MELI_CACHE_TTL_HOURS`: una corrida hace
-una llamada por banda y no una por listing. La referencia `internal` **no** se
-cachea — es una propiedad del batch de esa corrida, no del mercado. Si
-MercadoLibre falla, se deja de intentar por el resto de la corrida en vez de
-gastar un token request por listing.
-
-### Supabase: RLS y string de conexión
-
-**Activá RLS.** Supabase publica por PostgREST (`/rest/v1/`) toda tabla del
-schema `public`, y la anon key es pública por diseño. Las tablas creadas por SQL
-—como estas— arrancan con RLS **apagado**; sólo las creadas desde la UI vienen
-con RLS puesto. Sin RLS, cualquiera con la anon key lee y escribe `listings`,
-`sellers` y `contact_queue`.
-
-`schema.sql` ya lo hace: `ENABLE ROW LEVEL SECURITY` en las 7 tablas y **cero
-políticas**. Sin una policy que lo permita, PostgREST no le devuelve nada a
-`anon` ni a `authenticated`. El pipeline no se entera, porque no pasa por
-PostgREST: `repo.mjs` abre una conexión Postgres directa con `DATABASE_URL`, y
-ese rol es el **dueño** de las tablas — un dueño saltea RLS.
-
-Por eso mismo **no** se usa `FORCE ROW LEVEL SECURITY`: sujetaría también al
-dueño a unas políticas que no existen, y el worker perdería su propia escritura.
-Si alguna vez te conectás con un rol que no sea el dueño, hay que escribirle
-políticas explícitas.
-
-Hay dos tests de integración que lo cubren: uno verifica que las 7 tablas tengan
-`relrowsecurity` y ninguna `relforcerowsecurity`, y otro crea un rol que no es
-dueño y comprueba que RLS lo bloquea incluso con `GRANT SELECT` encima.
-
-Sobre el string de conexión: para `npm run migrate` usá el **directo**
-(puerto 5432), no el pooler en modo transacción (6543). El pooler está pensado
-para queries cortas y el schema se aplica como un solo bloque multi-sentencia.
-Para el worker sirven los dos.
+`DETAIL_SCORE_THRESHOLD` es **0**, no 0.25. Ese valor estaba calibrado contra una
+escala que ya no existe: al sacar el precio los scores se desplomaron y en una
+corrida real el máximo fue 0.096. Un umbral que nadie alcanza no filtra, deja el
+pipeline mudo. Quien limita el gasto es `DETAIL_MAX_PER_RUN`, que era quien lo
+hacía de verdad igual; el umbral sólo saca lo que tiene una bandera concreta en
+contra —sospecha de automotora, o un km no creíble—, que dan negativo.
 
 ### Cola de contacto
 
-La oferta se ancla a la **mediana de mercado**, nunca a un porcentaje fijo del
-precio publicado, y nunca supera lo que el vendedor pide. Cada entrada trae su
-expectativa de aceptación (`alta` / `media` / `baja`) según la distancia al
-precio publicado.
+**No hay envío automático y no hay monto sugerido.**
 
-Cuando el auto ya está por debajo de lo que la mediana dice que deberíamos
-pagar, el ancla queda por encima del precio publicado y la oferta colapsaba
-sobre él: un borrador que decía "te pago 5990" por un auto de 5990. Eso no es
-una oferta. En ese caso la oferta cae a un descuento por pago contado
-(`minCashDiscountPct`, 3%) y el mensaje lo dice de frente — el precio es
-razonable, lo que se ofrece es rapidez y certeza, no un lowball.
+Lo primero es por la cuenta: la mensajería automatizada por Messenger es lo que
+más rápido dispara el baneo. La cola queda en `pending` para aprobación y envío
+manual, y una vez que una persona la aprueba o descarta el worker no la vuelve a
+tocar.
 
-**No hay envío automático.** La cola queda en estado `pending` para aprobación y
-envío manual, y una vez que una persona la aprueba o descarta, el worker no la
-vuelve a tocar.
+Lo segundo es por el número: la oferta se anclaba a una mediana de mercado que
+resultó no existir, así que el monto tenía menos fundamento del que aparentaba —
+y un número que aparenta fundamento invita a usarlo sin pensar. La cola trae los
+**hechos** y el precio lo ponés vos:
+
+```
+1734174691163250 | Citroën picasso 2.0 2008
+  pide   USD 6500   (mediana del lote 7500, n=17)
+  km     210.000  (11.667/año)
+  deuda  ninguna declarada
+  publicado hace 19 días
+  https://www.facebook.com/marketplace/item/1734174691163250/
+  "Hola, buenas. Me interesa 2008 CITROEN PICASSO 2.0. ¿Sigue disponible?
+   ¿Se puede ver estos días? Pago al contado y lo retiro yo."
+```
+
+La `mediana del lote` es contexto, no score: dice cómo se compara ese aviso
+contra el resto de la página de Facebook, no contra valor de mercado. Las
+automotoras se excluyen de ese cálculo porque publican a precio de agencia.
+
+El borrador abre la conversación sin comprometer un número. Si el aviso declara
+una deuda, el monto aparece en los hechos —no se descuenta de nada, porque no
+hay nada de dónde descontarlo— y si la moneda no está clara queda en
+`debtNeedsReview` para que la mires.
 
 ### Worker programado
 
