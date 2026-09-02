@@ -149,14 +149,20 @@ Ese tope es el techo real del caudal, no el filtro de precio: mover el rango
 cambia **cuáles** 24 ves, no **cuántos**.
 
 ```bash
-npm run fb:login    # abre Chromium, logueás a mano, guarda la sesión
+npm run fb:login    # abre Chromium, logueás a mano, guarda la sesión y el .env
 npm run fb:check    # verifica que sirve y compara contra el tope de 24
 ```
 
-`fb:login` guarda un [storage state de Playwright](https://playwright.dev/docs/auth):
+`fb:login` **deja las variables puestas en el `.env` solo**. Antes sólo imprimía
+las líneas para copiar, y ése es justo el paso que se saltea: `fb:check` seguía
+diciendo "sesión: NINGUNA" con el archivo ya guardado al lado. Nunca pisa un
+valor que ya esté puesto — si el `.env` ya apunta a otra sesión, avisa y no toca
+nada, porque escribir sólo una de las dos claves te dejaría leyendo de una
+sesión y escribiendo en otra.
+
+Guarda un [storage state de Playwright](https://playwright.dev/docs/auth):
 todas las cookies más el localStorage, así que sobrevive más que pegar `c_user`
-y `xs` a mano y Facebook lo ve como el mismo navegador que hizo el login. Te
-imprime las dos líneas para el `.env` ya completas.
+y `xs` a mano, y Facebook lo ve como el mismo navegador que hizo el login.
 
 `FB_STORAGE_STATE_OUT` es adónde se reescribe la sesión si Facebook la rota
 durante una corrida. Sin eso, la rotación se pierde al cerrar el contexto y la

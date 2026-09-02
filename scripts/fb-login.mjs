@@ -16,8 +16,55 @@
  * contraseña ni segundo factor. Está en .gitignore; no lo pegues en ningún lado.
  */
 import { chromium } from "playwright";
-import { writeFile } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+
+/**
+ * Deja las variables puestas en el .env.
+ *
+ * Antes esto sólo imprimía las líneas para copiar, y ese es justo el paso que
+ * se saltea: `fb:check` seguía diciendo "sesión: NINGUNA" con el archivo ya
+ * guardado al lado. Nunca pisa un valor que ya esté puesto — si ya apuntás a
+ * otra sesión, avisa y no toca nada.
+ */
+async function ponerEnEnv(destino) {
+  const envPath = resolve("./.env");
+  let contenido = "";
+  let existia = true;
+  try {
+    contenido = await readFile(envPath, "utf8");
+  } catch {
+    existia = false;
+  }
+
+  const CLAVES = ["FB_STORAGE_STATE", "FB_STORAGE_STATE_OUT"];
+  const activa = (clave) => {
+    const m = new RegExp(`^\\s*${clave}\\s*=\\s*(.+)$`, "m").exec(contenido);
+    const v = m?.[1]?.trim();
+    return v ? v : null;
+  };
+
+  // Las dos claves se deciden JUNTAS. Si una ya apunta a otra sesión y la otra
+  // se reescribe igual, quedás leyendo de una y escribiendo en la otra, que es
+  // peor que no hacer nada: mezcla dos sesiones sin que se note.
+  const yaEstaban = CLAVES.map((k) => [k, activa(k)])
+    .filter(([, v]) => v && v !== destino)
+    .map(([k, v]) => `${k}=${v}`);
+  if (yaEstaban.length) return { envPath, existia, puestas: [], yaEstaban };
+
+  const puestas = [];
+  for (const clave of CLAVES) {
+    if (activa(clave) === destino) continue;           // ya apunta acá
+    contenido = contenido.replace(new RegExp(`^\\s*#\\s*${clave}\\s*=.*$`, "m"), "");
+    contenido += `${contenido.endsWith("\n") || !contenido ? "" : "\n"}${clave}=${destino}\n`;
+    puestas.push(clave);
+  }
+
+  if (puestas.length) {
+    await writeFile(envPath, contenido, { encoding: "utf8", mode: 0o600 });
+  }
+  return { envPath, existia, puestas, yaEstaban };
+}
 
 const destino = resolve(process.argv[2] ?? process.env.FB_STORAGE_STATE ?? "./fb-state.json");
 const ESPERA_MAX_MS = 5 * 60_000;
@@ -55,9 +102,21 @@ await browser.close();
 
 const cookies = state.cookies.filter((c) => c.domain.includes("facebook")).length;
 console.log(`\n✓ Sesión guardada (${cookies} cookies de facebook.com), permisos 600.`);
-console.log(`\nAgregá esto al .env:`);
-console.log(`  FB_STORAGE_STATE=${destino}`);
-console.log(`  FB_STORAGE_STATE_OUT=${destino}\n`);
-console.log(`Lo segundo hace que, si Facebook rota la sesión durante una corrida,`);
-console.log(`la versión nueva se escriba de vuelta y no se pierda.\n`);
-console.log(`Después: npm run fb:check\n`);
+console.log(`  ${destino}`);
+
+const env = await ponerEnEnv(destino);
+if (env.puestas.length) {
+  console.log(`\n✓ ${env.existia ? "Actualizado" : "Creado"} ${env.envPath}:`);
+  for (const k of env.puestas) console.log(`    ${k}=${destino}`);
+  console.log(`\n  FB_STORAGE_STATE_OUT es adónde se reescribe la sesión si Facebook la`);
+  console.log(`  rota durante una corrida. Sin eso, la rotación se pierde.`);
+} else if (env.yaEstaban.length) {
+  console.log(`\n! El .env ya apunta a otra sesión, no se tocó:`);
+  for (const l of env.yaEstaban) console.log(`    ${l}`);
+  console.log(`\n  Si querés usar la que acabás de capturar, cambialas a:`);
+  console.log(`    FB_STORAGE_STATE=${destino}`);
+  console.log(`    FB_STORAGE_STATE_OUT=${destino}`);
+} else {
+  console.log(`\n✓ El .env ya apuntaba acá.`);
+}
+console.log(`\nAhora: npm run fb:check\n`);
