@@ -1,0 +1,19 @@
+# Cada 6 horas, dentro del horario en que un humano estaría mirando Marketplace.
+#
+# Las reglas de politeness viven acá tanto como en el código:
+#   - OnCalendar acota la ventana horaria ("no correr 24/7" era explícito)
+#   - RandomizedDelaySec rompe la cadencia: una corrida a las 09:00 en punto,
+#     todos los días, es una firma trivial de detectar
+#   - Persistent recupera un disparo perdido si la máquina estuvo apagada, pero
+#     uno solo, no la cola entera
+[Unit]
+Description=fb_mp_scraper — dispara el pipeline cada ~6h en horario diurno
+
+[Timer]
+OnCalendar=*-*-* 09,15,21:00:00
+RandomizedDelaySec=45min
+Persistent=true
+Unit=fbmp-worker.service
+
+[Install]
+WantedBy=timers.target

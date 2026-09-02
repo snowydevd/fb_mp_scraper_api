@@ -609,6 +609,16 @@ una deuda, el monto aparece en los hechos —no se descuenta de nada, porque no
 hay nada de dónde descontarlo— y si la moneda no está clara queda en
 `debtNeedsReview` para que la mires.
 
+### Dejarlo corriendo solo
+
+Ver `deploy/` — unidades de systemd listas, y por qué **la nube no sirve acá**.
+
+El resumen: Cloudflare Workers corre en aislados de V8 sin sistema de archivos
+ni binarios propios, así que Chromium no entra. Pero la razón de fondo aplica a
+cualquier nube — Cloudflare, GitHub Actions, un VPS: todas salen por IP de
+datacenter, y desde ahí Facebook redirige al login. Correr desde una conexión
+residencial no es una limitación del proyecto, es lo que lo hace funcionar.
+
 ### Worker programado
 
 `npm run worker:schedule` corre el sync cada `WORKER_INTERVAL_HOURS` (6 por
