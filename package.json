@@ -14,7 +14,9 @@
     "worker:schedule:dry": "node src/worker/scheduler.mjs --dry",
     "test:integration": "node --test --test-concurrency=1 \"tests/integration/*.test.mjs\"",
     "db:up": "docker run -d --name fbmp-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=fbmp -p 55432:5432 postgres:16-alpine",
-    "db:down": "docker rm -f fbmp-pg"
+    "db:down": "docker rm -f fbmp-pg",
+    "fb:login": "node scripts/fb-login.mjs",
+    "fb:check": "node scripts/fb-check.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

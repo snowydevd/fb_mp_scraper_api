@@ -134,21 +134,47 @@ Los tres `BAD_REQUEST` posibles:
   guardar, descargá la imagen, no el link.
 - Los avisos duplicados que FB renderiza dos veces se deduplican por `id`.
 
-### Sesión de Facebook (recomendado)
+### Sesión de Facebook
 
-Sin sesión funciona: desde una IP residencial de Uruguay el Marketplace anónimo
-devuelve resultados normalmente (verificado). Desde IPs de datacenter Facebook
-suele redirigir al login, y en cualquier caso la sesión reduce el riesgo de que
-te corten por volumen. Configurala por variable de entorno:
+Sin sesión funciona —desde una IP residencial de Uruguay el Marketplace anónimo
+devuelve resultados, verificado— **pero corta en 24 resultados**:
 
-- `FB_COOKIES`: string de cookies crudo, por ejemplo `c_user=1000123...; xs=abc...`
-  (copiá los valores de `c_user` y `xs` desde las DevTools del navegador con tu
-  sesión abierta), o
-- `FB_STORAGE_STATE`: ruta a un JSON de [storage state de Playwright](https://playwright.dev/docs/auth)
-  generado con `npx playwright codegen --save-storage=fb-state.json facebook.com`.
+| filtro | resultados |
+| --- | ---: |
+| precio 5000–12000 | 24 |
+| precio 0–100000 | 24 |
+| 5000–12000 con `SCRAPER_SCROLL_PASSES=10` | 24 |
 
-Si la sesión expira, la API responde `LOGIN_REQUIRED` indicando que hay que
-renovarla.
+Ese tope es el techo real del caudal, no el filtro de precio: mover el rango
+cambia **cuáles** 24 ves, no **cuántos**.
+
+```bash
+npm run fb:login    # abre Chromium, logueás a mano, guarda la sesión
+npm run fb:check    # verifica que sirve y compara contra el tope de 24
+```
+
+`fb:login` guarda un [storage state de Playwright](https://playwright.dev/docs/auth):
+todas las cookies más el localStorage, así que sobrevive más que pegar `c_user`
+y `xs` a mano y Facebook lo ve como el mismo navegador que hizo el login. Te
+imprime las dos líneas para el `.env` ya completas.
+
+`FB_STORAGE_STATE_OUT` es adónde se reescribe la sesión si Facebook la rota
+durante una corrida. Sin eso, la rotación se pierde al cerrar el contexto y la
+sesión envejece antes.
+
+A mano también sirve, y es más frágil:
+`FB_COOKIES="c_user=1000123...; xs=abc..."` copiando esas dos cookies del
+DevTools.
+
+> **El archivo de sesión es un token vivo.** Quien lo tenga entra a tu cuenta sin
+> contraseña ni segundo factor — peor que filtrar una contraseña, porque no hay
+> nada que rotar salvo cerrar todas las sesiones. Está cubierto por `.gitignore`
+> (`*state*.json`, `*session*.json`, `*cookies*.json`, `fb-*.json`) y `fb:login`
+> lo escribe con permisos 600. Conviene usar una cuenta secundaria: asumí que
+> las cuentas se pierden, y que la sesión sea fácil de rotar.
+
+Si la sesión expira, la API responde `LOGIN_REQUIRED`; volvé a correr
+`npm run fb:login`.
 
 ### Tuning opcional (variables de entorno)
 

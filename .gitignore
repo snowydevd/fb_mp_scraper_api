@@ -1,5 +1,7 @@
 node_modules/
 .env
+.env.*
+!.env.example
 
 # MCP server build output
 mcp-server/dist/
@@ -8,5 +10,10 @@ mcp-server/dist/
 .vscode/
 mcp-server/.vscode/
 
-# Facebook session state - cookies, never commit
-storage-state*.json
+# Sesión de Facebook. Un storage state es un token VIVO: quien lo tenga entra a
+# la cuenta sin contraseña ni 2FA. Peor que filtrar una contraseña, porque no
+# hay nada que rotar salvo cerrar todas las sesiones.
+*state*.json
+*session*.json
+*cookies*.json
+fb-*.json
